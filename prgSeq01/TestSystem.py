@@ -5,8 +5,8 @@ import time
 import _thread
 from  machine import Pin
 #from NeoPixel.neopixel import Neopixel
-from neopixel import Neopixel
-from BlackLight.BlackLightControl import BlackLightControl
+from lib.Neopixel.neopixel import Neopixel
+from lib.BlackLight.BlackLightControl import BlackLightControl
 
 DATA_PIN = 29
 STATE_MACHINE = 0
