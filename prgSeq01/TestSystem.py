@@ -11,10 +11,10 @@ from BlackLight.BlackLightControl import BlackLightControl
 DATA_PIN = 29
 STATE_MACHINE = 0
 SECCIONES = 5
-LEDS_POR_SECCION = [30, 30, 30, 30, 30]
+LEDS_POR_SECCION = [20, 20, 20,20,20]
 TOTAL_LEDS = sum(LEDS_POR_SECCION)  # 370
 
-numpix = 100
+numpix = TOTAL_LEDS
 #strip = Neopixel(numpix, 0, 29, "RGB")
 Ready = Neopixel(1, 1, 16, "GRB")
 
@@ -63,11 +63,10 @@ colors_rgbw.append((0, 0, 0, 255))
 colors = colors_rgbw
 
 section_colors = [blue, blanco, blanco, cian, special]
-triggers = [20, 10, 5, 20]
+triggers = [10, 10, 10, 10]
 
-strip = Neopixel(num_leds=100, state_machine=STATE_MACHINE, pin=DATA_PIN, mode="RGB")
-
-
+strip = Neopixel(num_leds=numpix, state_machine=STATE_MACHINE, pin=DATA_PIN, mode="RGB")
+strip.brightness(255)
 
 Ready.brightness(255)
 Ready.fill(red)
@@ -89,13 +88,13 @@ iFinishDelay=0.06
 #strip.animate_color_range(0,35,Off,1,True) 
 
 def MonStart():
-    strip.circular_bounce_fill(wite,iStartDelay,iFinishDelay,20)
-    strip.animate_color_range(25,34,blue,0.5,False)    
-    strip.animate_color_range(0,24,yellow,1.5,False)
+    strip.circular_bounce_fill(wite,iStartDelay,iFinishDelay,100)
+    strip.animate_color_range(0,TOTAL_LEDS,blue,0.5,False)    
+    #strip.animate_color_range(0,24,yellow,1.5,False)
 
 def MonSleep():
-    strip.animate_color_range(25,34,wite,0.5,True)
-    strip.animate_color_range(0,35,Off,1,True) 
+    #strip.animate_color_range(25,34,wite,0.5,True)
+    strip.animate_color_range(0,TOTAL_LEDS,Off,1,True) 
 
 
 
@@ -104,25 +103,25 @@ Ready.fill(green)
 Ready.show()
 while True: 
       
-    strip.animate_color_range(25,34,wite,0.5,True)
-    print("done")   
-    strip.SecuencialCascade(
-    data_pin=29,
-    total_leds=150,
-    sections_count=5,
-    leds_per_section=[20, 20,20,20,20],
-    section_colors=[purpura,red,green, cian, blue],
-    step_ms=30,
-    trigger_position=[5, 5,5,5],
-    trail=True,
-    repeat=False,
-    state_machine=0,
-    brightness=80
-)
-    strip._GradientTransition(section_colors_now=[yellow,purpura,cian],section_colors_mid=[red,blue,(255,0,255)],section_colors_final=[purpura,green,red],leds_per_section=[33,33,33],section_count=3,total_leds=65,step_ms=16,start_brightness=80,repeat=False,phase_steps=80)
+    #strip.animate_color_range(25,34,wite,0.5,True)
+    #print("done")   
+    #strip.SecuencialCascade(
+    #data_pin=29,
+    #total_leds=150,
+    #sections_count=5,
+    #leds_per_section=LEDS_POR_SECCION,
+    #section_colors=[purpura,red,green, cian, blue],
+    #step_ms=30,
+    #trigger_position=triggers,
+    #trail=True,
+    #repeat=False,
+    #state_machine=0,
+    #brightness=80
+#)
+    strip._GradientTransition(section_colors_now=[yellow,purpura,cian],section_colors_mid=[red,blue,(255,0,255)],section_colors_final=[purpura,green,red],leds_per_section=[33,33,33],section_count=3,total_leds=100,step_ms=16,start_brightness=80,repeat=False,phase_steps=80)
     
     MonStart()      
-    BlackLight.ramp_percent(1,0.5,100,90)
+    #BlackLight.ramp_percent(1,0.5,100,90)
     MonSleep() 
     #BlackLight.ramp_percent(1,0.5,90,100)
     
