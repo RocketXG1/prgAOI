@@ -1,0 +1,766 @@
+1. TITULO
+
+Archivo fuente analizado: objStepperAxis.py
+Archivo de ejemplos de instanciacion y uso para los objetos, clases y metodos principales del modulo objStepperAxis.py.
+
+
+2. INTRODUCCION
+
+Este archivo contiene ejemplos practicos para aprender a instanciar y usar las clases disponibles en el modulo objStepperAxis.py.
+
+Los ejemplos estan orientados a Raspberry Pi Pico / RP2040 con MicroPython y a un sistema XYZ con motores a pasos, drivers externos STEP/DIR/ENABLE y sensores HOME opcionales.
+
+El modulo objStepperAxis.py permite controlar ejes lineales individuales usando una StateMachine PIO distinta por eje. La version analizada trabaja con velocidad fija; no implementa aceleracion, desaceleracion, perfil trapezoidal ni movimiento coordinado real entre varios ejes.
+
+Los valores usados en este documento son ejemplos de aprendizaje. Antes de probar en hardware real se deben ajustar pines, sm_id, limites, velocidad, microsteps, configuracion mecanica de polea/banda o tornillo/husillo, polaridad de ENABLE, polaridad del sensor HOME y sentido de giro segun el montaje real.
+
+Los ejemplos sirven para aprender el uso de las clases del modulo, pero no reemplazan la calibracion mecanica ni las pruebas de seguridad del sistema.
+
+
+3. REQUISITOS PREVIOS
+
+Modulos que deben existir en la Raspberry Pi Pico:
+
+    - machine
+      Usado por objStepperAxis.py para controlar GPIO mediante Pin.
+
+    - rp2
+      Usado por objStepperAxis.py para definir el programa PIO y crear StateMachine.
+
+    - time
+      Usado por objStepperAxis.py para esperas con time.sleep_ms().
+
+    - objStepperAxis.py
+      Debe estar cargado previamente en la Pico o en una ruta importable por MicroPython.
+
+Clases importadas en los ejemplos:
+
+    - BeltStepperAxis
+    - ScrewStepperAxis
+
+Requisitos de hardware:
+
+    - Se requiere Raspberry Pi Pico, Raspberry Pi Pico W u otra placa compatible con RP2040 y MicroPython.
+
+    - Se requieren drivers externos para motores a pasos con entradas STEP, DIR y ENABLE. Ejemplos: TB6600, TMC2209, DRV8825, A4988 o similares.
+
+    - La Pico no alimenta directamente los motores. Los motores deben conectarse a drivers externos y a una fuente adecuada para los motores.
+
+    - Los drivers externos y la Pico deben compartir GND comun.
+
+    - Para usar home(), se requiere un sensor HOME o final de carrera conectado al home_pin configurado.
+
+    - Si no se configura home_pin, el metodo home() fallara con un error interno indicando que no hay home_pin configurado.
+
+Dependencias del proyecto:
+
+    - objStepperAxis.py no contiene una clase MotionController.
+
+    - objStepperAxis.py representa ejes individuales. Si se desea coordinar varios ejes con un controlador, se debe usar otro modulo del proyecto o crear una logica externa que administre varios objetos de eje.
+
+    - Los ejemplos de varios ejes de este documento instancian varios objetos directamente, sin inventar una clase controladora inexistente en este archivo.
+
+
+4. CLASES DISPONIBLES EN EL ARCHIVO
+
+Clase: StepperAxisBase
+
+    Proposito:
+        Clase base para controlar un eje lineal con senales STEP, DIR, ENABLE, HOME opcional y generacion de pulsos mediante PIO.
+
+    Cuando conviene usarla:
+        Conviene usarla como clase padre para crear nuevos tipos de transmision mecanica. No conviene instanciarla directamente porque _calculate_steps_per_mm() no esta implementado y lanza NotImplementedError.
+
+    Parametros principales:
+        name, step_pin, dir_pin, enable_pin, sm_id, motor_steps_per_rev, microsteps, speed_mm_s, max_speed_mm_s, min_position_mm, max_position_mm, home_pin, home_direction, home_speed_mm_s, home_backoff_mm, invert_direction, enable_active_low, home_active_low.
+
+    Metodos principales usados en los ejemplos:
+        enable(), disable(), home(), move_to_mm(), move_relative_mm(), start_move_to_mm(), start_move_relative_mm(), wait_until_done(), set_speed_mm_s(), get_position(), get_status(), is_home_active(), stop().
+
+Clase: BeltStepperAxis
+
+    Proposito:
+        Representa un eje lineal movido por polea y banda. Calcula steps_per_mm usando motor_steps_per_rev, microsteps, pulley_teeth y belt_pitch_mm.
+
+    Cuando conviene usarla:
+        Conviene usarla en ejes X o Y de impresoras, CNC ligeras, mesas XY o sistemas cartesianos donde el movimiento lineal se genera con polea dentada y correa.
+
+    Parametros principales:
+        pulley_teeth, belt_pitch_mm y todos los parametros heredados de StepperAxisBase.
+
+    Metodos principales usados en los ejemplos:
+        home(), move_to_mm(), move_relative_mm(), start_move_to_mm(), wait_until_done(), get_status(), stop(), set_speed_mm_s().
+
+Clase: ScrewStepperAxis
+
+    Proposito:
+        Representa un eje lineal movido por tornillo, husillo o varilla roscada. Calcula steps_per_mm usando motor_steps_per_rev, microsteps y screw_lead_mm.
+
+    Cuando conviene usarla:
+        Conviene usarla en ejes Z, elevadores, actuadores lineales o mecanismos donde el avance lineal depende del paso o avance del tornillo.
+
+    Parametros principales:
+        screw_lead_mm y todos los parametros heredados de StepperAxisBase.
+
+    Metodos principales usados en los ejemplos:
+        home(), move_to_mm(), move_relative_mm(), start_move_to_mm(), wait_until_done(), get_status(), stop(), set_speed_mm_s().
+
+
+5. VARIABLES Y PARAMETROS USADOS EN LOS EJEMPLOS
+
+Parametro: name
+    Explicacion: Nombre logico del eje. Sirve para identificarlo en get_status().
+    Valores tipicos: "X", "Y", "Z".
+
+Parametro: step_pin
+    Explicacion: GPIO conectado a la entrada STEP o PUL del driver.
+    Valores tipicos: 2, 6, 10.
+
+Parametro: dir_pin
+    Explicacion: GPIO conectado a la entrada DIR del driver.
+    Valores tipicos: 3, 7, 11.
+
+Parametro: enable_pin
+    Explicacion: GPIO conectado a la entrada ENABLE del driver.
+    Valores tipicos: 4, 8, 12.
+
+Parametro: sm_id
+    Explicacion: Identificador de StateMachine PIO usado para generar pulsos. Cada eje debe usar un sm_id diferente.
+    Valores tipicos: 0 para X, 1 para Y, 2 para Z.
+
+Parametro: motor_steps_per_rev
+    Explicacion: Pasos completos del motor por vuelta.
+    Valores tipicos: 200 para motor de 1.8 grados, 400 para motor de 0.9 grados.
+
+Parametro: microsteps
+    Explicacion: Configuracion de micropasos del driver. Debe coincidir con los DIP switches o configuracion electronica real del driver.
+    Valores tipicos: 1, 2, 4, 8, 16, 32.
+
+Parametro: speed_mm_s
+    Explicacion: Velocidad fija normal de movimiento en mm/s.
+    Valores tipicos: 5.0, 10.0, 20.0.
+
+Parametro: max_speed_mm_s
+    Explicacion: Velocidad maxima permitida por software. speed_mm_s y home_speed_mm_s deben ser menores o iguales a este valor.
+    Valores tipicos: 30.0, 60.0, 100.0.
+
+Parametro: pulley_teeth
+    Explicacion: Numero de dientes de la polea. Solo aplica a BeltStepperAxis.
+    Valores tipicos: 16, 20,  GT2 de 20 dientes.
+
+Parametro: belt_pitch_mm
+    Explicacion: Paso de la banda en milimetros. Solo aplica a BeltStepperAxis.
+    Valores tipicos: 2.0 para banda GT2.
+
+Parametro: screw_lead_mm
+    Explicacion: Avance lineal del tornillo por vuelta completa. Solo aplica a ScrewStepperAxis.
+    Valores tipicos: 2.0, 4.0, 8.0.
+
+Parametro: home_pin
+    Explicacion: GPIO conectado al sensor HOME o final de carrera. Si es None, no se puede ejecutar home().
+    Valores tipicos: 14, 15, 16, None.
+
+Parametro: home_direction
+    Explicacion: Sentido de busqueda del HOME. El codigo convierte cualquier valor menor que 0 en -1 y cualquier valor 0 o mayor en 1.
+    Valores tipicos: -1 si el HOME esta hacia el minimo, 1 si esta hacia el maximo.
+
+Parametro: home_speed_mm_s
+    Explicacion: Velocidad usada durante la rutina de HOME.
+    Valores tipicos: 2.0, 3.0, 5.0.
+
+Parametro: home_backoff_mm
+    Explicacion: Distancia de retirada despues de tocar el sensor HOME antes de hacer la segunda aproximacion lenta.
+    Valores tipicos: 1.0, 2.0, 5.0.
+
+Parametro: min_position_mm
+    Explicacion: Limite minimo permitido para movimientos absolutos.
+    Valores tipicos: 0.0, -5.0.
+
+Parametro: max_position_mm
+    Explicacion: Limite maximo permitido para movimientos absolutos.
+    Valores tipicos: 100.0, 200.0, 300.0.
+
+Parametro: invert_direction
+    Explicacion: Invierte la logica enviada al pin DIR. Se usa cuando el eje se mueve en sentido contrario al esperado.
+    Valores tipicos: False, True.
+
+Parametro: enable_active_low
+    Explicacion: Define la polaridad de ENABLE. Si True, el driver se habilita escribiendo 0 en enable_pin.
+    Valores tipicos: True para muchos drivers, False si el driver habilita con nivel alto.
+
+Parametro: home_active_low
+    Explicacion: Define la polaridad del sensor HOME. Si True, el HOME se considera activo cuando el pin lee 0.
+    Valores tipicos: True para finales de carrera con pull-up, False para sensores activos en alto.
+
+
+6. CONSIDERACIONES DE HARDWARE
+
+Los pines usados en los ejemplos son solo referencias. Deben cambiarse segun el cableado real.
+
+Cada eje debe usar un sm_id diferente si usa PIO. No se debe repetir el mismo sm_id en X, Y y Z porque cada eje necesita su propia StateMachine.
+
+No se deben repetir pines STEP, DIR, ENABLE ni HOME entre ejes, salvo que exista una razon electrica muy clara y controlada. En general, cada senal debe tener su propio GPIO.
+
+Los drivers de motor deben compartir GND con la Raspberry Pi Pico. Sin GND comun, las senales STEP, DIR y ENABLE pueden no ser interpretadas correctamente.
+
+La Raspberry Pi Pico no alimenta los motores. La Pico solo entrega senales logicas. Los motores deben alimentarse desde una fuente externa adecuada y a traves de drivers de potencia.
+
+Los motores deben estar conectados a drivers externos. No conecte bobinas del motor directamente a GPIO de la Pico.
+
+Los sensores HOME deben probarse antes de mover. Use is_home_active() o lecturas simples de Pin para confirmar la polaridad real del sensor antes de ejecutar home().
+
+Durante pruebas sin sensor HOME, se puede simular is_homed_flag = True solo para pruebas controladas, de banco, con el motor desconectado de la carga o con recorrido libre y seguro. No se debe usar esa simulacion para operacion real porque se pierde la referencia fisica.
+
+
+7. EJEMPLO 1 - INSTANCIACION MINIMA O BASICA
+
+Objetivo:
+    Crear un eje X por banda/polea con los parametros minimos razonables y consultar su estado.
+
+Notas:
+    - No se configura home_pin, por lo que home() no debe ejecutarse en este ejemplo.
+    - Para poder demostrar move_to_mm() sin sensor HOME, se marca is_homed_flag = True solo como simulacion controlada.
+    - En hardware real se debe usar home_pin y ejecutar home() antes de mover.
+
+Codigo completo:
+
+    from objStepperAxis import BeltStepperAxis
+
+    eje_x = BeltStepperAxis(
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        name="X",
+        step_pin=2,
+        dir_pin=3,
+        enable_pin=4,
+        sm_id=0,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=10.0,
+        max_speed_mm_s=50.0,
+        min_position_mm=0.0,
+        max_position_mm=200.0
+    )
+
+    print("Estado inicial:", eje_x.get_status())
+
+    # SOLO PARA PRUEBA CONTROLADA SIN HOME REAL.
+    # No usar esto como procedimiento normal de operacion.
+    eje_x.is_homed_flag = True
+    eje_x.state = "IDLE"
+
+    eje_x.move_to_mm(20.0)
+    print("Posicion despues del movimiento:", eje_x.get_position())
+    print("Estado final:", eje_x.get_status())
+
+Explicacion linea por linea:
+    - from objStepperAxis import BeltStepperAxis importa la clase para ejes por banda.
+    - pulley_teeth=20 indica que la polea tiene 20 dientes.
+    - belt_pitch_mm=2.0 indica que la banda es de paso 2 mm, por ejemplo GT2.
+    - name="X" identifica el eje como X.
+    - step_pin=2, dir_pin=3 y enable_pin=4 son GPIO de ejemplo.
+    - sm_id=0 asigna la StateMachine 0 al eje X.
+    - motor_steps_per_rev=200 indica un motor tipico de 1.8 grados por paso.
+    - microsteps=16 debe coincidir con la configuracion real del driver.
+    - speed_mm_s=10.0 define la velocidad normal.
+    - max_speed_mm_s=50.0 define el limite de velocidad permitido.
+    - min_position_mm y max_position_mm definen el rango permitido.
+    - get_status() devuelve un diccionario con estado, posicion, limites, velocidad y homing.
+    - is_homed_flag = True se usa aqui solo para permitir la prueba sin HOME real.
+    - move_to_mm(20.0) ordena ir a la posicion absoluta 20.0 mm.
+
+Valores que deben cambiarse segun el hardware:
+    step_pin, dir_pin, enable_pin, sm_id, motor_steps_per_rev, microsteps, pulley_teeth, belt_pitch_mm, speed_mm_s, max_speed_mm_s y limites.
+
+
+8. EJEMPLO 2 - INSTANCIACION CON PARAMETROS DE HOME
+
+Objetivo:
+    Crear un eje X por banda/polea con sensor HOME, ejecutar home() y luego hacer un movimiento absoluto.
+
+Comportamiento:
+    El metodo home() busca el sensor en home_direction, se retira home_backoff_mm y hace una segunda aproximacion lenta. Al terminar correctamente, la posicion logica queda en 0.0 mm y el eje queda listo para movimientos absolutos.
+
+Si el sensor trabaja invertido:
+    - Si el sensor queda activo cuando el pin lee 0, use home_active_low=True.
+    - Si el sensor queda activo cuando el pin lee 1, use home_active_low=False.
+    - Una polaridad incorrecta puede hacer que home() crea que el sensor ya esta activo o que nunca lo detecte.
+
+Codigo completo:
+
+    from objStepperAxis import BeltStepperAxis
+
+    eje_x = BeltStepperAxis(
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        name="X",
+        step_pin=2,
+        dir_pin=3,
+        enable_pin=4,
+        sm_id=0,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=8.0,
+        max_speed_mm_s=40.0,
+        min_position_mm=0.0,
+        max_position_mm=200.0,
+        home_pin=14,
+        home_direction=-1,
+        home_speed_mm_s=3.0,
+        home_backoff_mm=2.0,
+        home_active_low=True
+    )
+
+    print("HOME activo antes de buscar:", eje_x.is_home_active())
+
+    if eje_x.home():
+        print("HOME completado")
+        eje_x.move_to_mm(25.0)
+        print("Posicion actual:", eje_x.get_position())
+    else:
+        print("Error durante HOME:", eje_x.get_status())
+
+Explicacion:
+    - home_pin=14 conecta el sensor HOME al GPIO 14.
+    - home_direction=-1 busca el HOME hacia el sentido negativo del eje.
+    - home_speed_mm_s=3.0 reduce la velocidad durante el referenciado.
+    - home_backoff_mm=2.0 retira 2 mm despues de tocar el sensor.
+    - home_active_low=True asume un final de carrera normalmente abierto o normalmente cerrado cableado con pull-up, activo a nivel bajo.
+    - is_home_active() permite verificar si el sensor se detecta activo antes de iniciar.
+    - home() deja la posicion en 0.0 mm si termina correctamente.
+    - move_to_mm(25.0) mueve a 25.0 mm absolutos desde el cero definido por HOME.
+
+
+9. EJEMPLO 3 - INSTANCIACION CON LIMITES Y DIRECCION INVERTIDA
+
+Objetivo:
+    Crear un eje Z con tornillo/husillo, limites definidos e inversion de direccion.
+
+Cuando se usa invert_direction:
+    Use invert_direction=True cuando al pedir un movimiento positivo el eje se mueve fisicamente hacia el lado negativo, o cuando el cableado/montaje del motor invierte el sentido esperado. Tambien puede corregirse intercambiando bobinas del motor, pero hacerlo por software suele ser mas rapido durante calibracion.
+
+Que ocurre si se pide un objetivo fuera de rango:
+    start_move_to_mm() y move_to_mm() validan el objetivo con min_position_mm y max_position_mm. Si el objetivo queda fuera de rango, el eje pasa a estado ERROR, registra un mensaje en error y no inicia el movimiento.
+
+Codigo completo:
+
+    from objStepperAxis import ScrewStepperAxis
+
+    eje_z = ScrewStepperAxis(
+        screw_lead_mm=8.0,
+        name="Z",
+        step_pin=10,
+        dir_pin=11,
+        enable_pin=12,
+        sm_id=2,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=4.0,
+        max_speed_mm_s=20.0,
+        min_position_mm=0.0,
+        max_position_mm=80.0,
+        home_pin=16,
+        home_direction=-1,
+        home_speed_mm_s=2.0,
+        home_backoff_mm=1.0,
+        invert_direction=True,
+        enable_active_low=True,
+        home_active_low=True
+    )
+
+    if eje_z.home():
+        print("Z referenciado")
+        eje_z.move_to_mm(10.0)
+        print("Z en:", eje_z.get_position())
+
+        resultado = eje_z.move_to_mm(120.0)
+        if not resultado:
+            print("Movimiento rechazado por limite:", eje_z.get_status())
+    else:
+        print("No se pudo hacer HOME en Z:", eje_z.get_status())
+
+Explicacion:
+    - ScrewStepperAxis se usa porque el eje Z esta basado en tornillo/husillo.
+    - screw_lead_mm=8.0 significa que una vuelta completa avanza 8 mm.
+    - min_position_mm=0.0 y max_position_mm=80.0 limitan el recorrido permitido.
+    - invert_direction=True invierte la senal DIR calculada por el objeto.
+    - move_to_mm(10.0) es valido porque esta dentro de 0.0 a 80.0 mm.
+    - move_to_mm(120.0) se rechaza porque esta fuera del limite maximo.
+
+
+10. EJEMPLO 4 - USO CON VARIOS EJES
+
+Objetivo:
+    Crear tres ejes X, Y y Z. X e Y usan banda/polea. Z usa tornillo/husillo. Luego se ejecutan movimientos absolutos.
+
+Importante sobre movimiento absoluto:
+    move_to_mm(150.0) y despues move_to_mm(70.0) significa ir a la posicion absoluta 70.0 mm. No significa sumar 70.0 mm a la posicion anterior. Para sumar o restar distancia se usa move_relative_mm().
+
+Nota sobre sincronizacion:
+    Este archivo no implementa movimiento coordinado multi-eje. Si se llama move_to_mm() en cada eje, cada llamada es bloqueante. Para iniciar varios ejes de forma casi simultanea se pueden usar start_move_to_mm() y luego esperar a todos con wait_until_done(), pero no hay interpolacion ni sincronizacion geometrica real.
+
+Codigo completo:
+
+    from objStepperAxis import BeltStepperAxis, ScrewStepperAxis
+
+    eje_x = BeltStepperAxis(
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        name="X",
+        step_pin=2,
+        dir_pin=3,
+        enable_pin=4,
+        sm_id=0,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=12.0,
+        max_speed_mm_s=60.0,
+        min_position_mm=0.0,
+        max_position_mm=300.0,
+        home_pin=14,
+        home_direction=-1,
+        home_speed_mm_s=4.0,
+        home_backoff_mm=2.0
+    )
+
+    eje_y = BeltStepperAxis(
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        name="Y",
+        step_pin=6,
+        dir_pin=7,
+        enable_pin=8,
+        sm_id=1,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=12.0,
+        max_speed_mm_s=60.0,
+        min_position_mm=0.0,
+        max_position_mm=250.0,
+        home_pin=15,
+        home_direction=-1,
+        home_speed_mm_s=4.0,
+        home_backoff_mm=2.0
+    )
+
+    eje_z = ScrewStepperAxis(
+        screw_lead_mm=8.0,
+        name="Z",
+        step_pin=10,
+        dir_pin=11,
+        enable_pin=12,
+        sm_id=2,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=4.0,
+        max_speed_mm_s=20.0,
+        min_position_mm=0.0,
+        max_position_mm=80.0,
+        home_pin=16,
+        home_direction=-1,
+        home_speed_mm_s=2.0,
+        home_backoff_mm=1.0
+    )
+
+    for eje in (eje_x, eje_y, eje_z):
+        if not eje.home():
+            print("Fallo HOME en", eje.name, eje.get_status())
+
+    eje_x.start_move_to_mm(150.0)
+    eje_y.start_move_to_mm(100.0)
+    eje_z.start_move_to_mm(20.0)
+
+    eje_x.wait_until_done()
+    eje_y.wait_until_done()
+    eje_z.wait_until_done()
+
+    print("Posicion X:", eje_x.get_position())
+    print("Posicion Y:", eje_y.get_position())
+    print("Posicion Z:", eje_z.get_position())
+
+    eje_x.move_to_mm(70.0)
+    print("X fue a 70 mm absolutos, no sumo 70 mm:", eje_x.get_position())
+
+Explicacion:
+    - X usa sm_id=0, Y usa sm_id=1 y Z usa sm_id=2. No se repite StateMachine.
+    - X e Y usan BeltStepperAxis porque se asumen mecanismos por banda.
+    - Z usa ScrewStepperAxis porque se asume mecanismo por tornillo.
+    - Primero se hace home() en cada eje.
+    - start_move_to_mm() inicia movimientos no bloqueantes.
+    - wait_until_done() espera a que cada eje termine.
+    - move_to_mm(70.0) en X va al valor absoluto 70.0 mm.
+
+
+11. EJEMPLO 5 - USO AVANZADO O CASO COMPLETO
+
+Objetivo:
+    Mostrar un flujo completo para un eje: configurar velocidad, hacer HOME, realizar movimiento absoluto, movimiento relativo, consultar status y detener el eje.
+
+Alcance avanzado real de este modulo:
+    Este modulo no tiene aceleracion, desaceleracion ni perfil trapezoidal. El uso avanzado disponible consiste en combinar HOME, cambios de velocidad fija con set_speed_mm_s(), movimientos no bloqueantes con start_move_to_mm(), espera con wait_until_done(), movimientos relativos, status y stop().
+
+Codigo completo:
+
+    from objStepperAxis import BeltStepperAxis
+
+    eje_x = BeltStepperAxis(
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        name="X",
+        step_pin=2,
+        dir_pin=3,
+        enable_pin=4,
+        sm_id=0,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        speed_mm_s=8.0,
+        max_speed_mm_s=50.0,
+        min_position_mm=0.0,
+        max_position_mm=200.0,
+        home_pin=14,
+        home_direction=-1,
+        home_speed_mm_s=3.0,
+        home_backoff_mm=2.0,
+        invert_direction=False,
+        enable_active_low=True,
+        home_active_low=True
+    )
+
+    print("Estado inicial:", eje_x.get_status())
+
+    if not eje_x.home():
+        print("No se pudo hacer HOME:", eje_x.get_status())
+    else:
+        print("HOME correcto:", eje_x.get_status())
+
+        eje_x.set_speed_mm_s(15.0)
+
+        eje_x.start_move_to_mm(60.0)
+        while eje_x.get_status()["moving"]:
+            print("Moviendo a 60 mm, posicion actual registrada:", eje_x.get_position())
+            eje_x.wait_until_done()
+
+        print("Movimiento absoluto terminado:", eje_x.get_status())
+
+        eje_x.move_relative_mm(-10.0)
+        print("Despues de mover -10 mm relativos:", eje_x.get_status())
+
+        eje_x.move_to_mm(30.0)
+        print("Despues de volver a 30 mm absolutos:", eje_x.get_status())
+
+        eje_x.stop()
+        print("Despues de stop:", eje_x.get_status())
+
+Explicacion del flujo completo:
+    - Se crea un eje X por banda/polea con HOME y limites.
+    - Se consulta el estado inicial con get_status().
+    - Se ejecuta home() para fijar el cero real.
+    - Se cambia la velocidad fija con set_speed_mm_s(15.0).
+    - Se inicia un movimiento absoluto no bloqueante con start_move_to_mm(60.0).
+    - Se espera el final con wait_until_done().
+    - Se ejecuta move_relative_mm(-10.0), que resta 10 mm a la posicion actual.
+    - Se ejecuta move_to_mm(30.0), que va a 30 mm absolutos.
+    - Se llama stop(), que detiene PIO, deshabilita el driver e invalida el HOME. Despues de stop() se requiere hacer home() nuevamente antes de mover.
+
+
+12. DIAGRAMA DE USO ENTRE OBJETOS
+
+Ejemplo con ejes individuales:
+
+    +-----------------------+
+    | BeltStepperAxis       |
+    | Eje X                 |
+    | Banda / polea         |
+    +-----------------------+
+              |
+              v
+       Driver STEP/DIR/ENABLE X
+              |
+              v
+          Motor X
+
+    +-----------------------+
+    | BeltStepperAxis       |
+    | Eje Y                 |
+    | Banda / polea         |
+    +-----------------------+
+              |
+              v
+       Driver STEP/DIR/ENABLE Y
+              |
+              v
+          Motor Y
+
+    +-----------------------+
+    | ScrewStepperAxis      |
+    | Eje Z                 |
+    | Tornillo / husillo    |
+    +-----------------------+
+              |
+              v
+       Driver STEP/DIR/ENABLE Z
+              |
+              v
+          Motor Z
+
+Relacion con la clase base:
+
+    +-----------------------+
+    | StepperAxisBase       |
+    | Logica comun          |
+    +-----------------------+
+          ^             ^
+          |             |
+    +-------------+   +--------------+
+    | BeltStepper |   | ScrewStepper |
+    | Axis        |   | Axis         |
+    +-------------+   +--------------+
+
+
+13. DIAGRAMA DE LLAMADAS TIPICAS
+
+Flujo tipico para un eje con HOME real:
+
+    Crear objeto
+        |
+        v
+    Verificar sensor con is_home_active()
+        |
+        v
+    home()
+        |
+        v
+    set_speed_mm_s() opcional
+        |
+        v
+    move_to_mm() o start_move_to_mm()
+        |
+        v
+    wait_until_done()
+        |
+        v
+    move_relative_mm() opcional
+        |
+        v
+    get_status()
+        |
+        v
+    stop() si se requiere detener e invalidar HOME
+
+Flujo tipico para varios ejes:
+
+    Crear eje X, eje Y, eje Z
+        |
+        v
+    home() en cada eje
+        |
+        v
+    start_move_to_mm() en X, Y y Z
+        |
+        v
+    wait_until_done() en X, Y y Z
+        |
+        v
+    get_status() de cada eje
+
+
+14. EXPLICACION DE LOS 5 EJEMPLOS
+
+Ejemplo 1:
+    Usa una instanciacion basica de BeltStepperAxis con polea, banda, pines, sm_id, motor_steps_per_rev, microsteps, velocidad y limites. Sirve para entender la creacion del objeto y la consulta de estado. La simulacion is_homed_flag=True solo es aceptable en pruebas controladas sin HOME real.
+
+Ejemplo 2:
+    Agrega home_pin, home_direction, home_speed_mm_s, home_backoff_mm y home_active_low. Sirve como base cuando el eje tiene un sensor HOME real y se quiere referenciar antes de mover.
+
+Ejemplo 3:
+    Agrega ScrewStepperAxis, screw_lead_mm, limites estrictos e invert_direction=True. Sirve como base para ejes Z o actuadores con tornillo, y para validar que los movimientos fuera de rango se rechazan.
+
+Ejemplo 4:
+    Agrega el uso de varios ejes X, Y y Z. X e Y son por banda/polea y Z por tornillo/husillo. Sirve como base para sistemas XYZ donde se requiere administrar varios objetos de eje. Tambien muestra que move_to_mm() usa posiciones absolutas.
+
+Ejemplo 5:
+    Agrega un flujo completo con HOME, cambio de velocidad fija, movimiento absoluto no bloqueante, espera, movimiento relativo, consulta de status y stop. Sirve como base para una secuencia de prueba mas completa.
+
+Cuando conviene usar cada ejemplo como base:
+    - Use el ejemplo 1 para aprender la sintaxis de instanciacion y revisar conversion mecanica basica.
+    - Use el ejemplo 2 cuando ya tenga sensor HOME cableado y probado.
+    - Use el ejemplo 3 para ejes de tornillo/husillo o cuando necesite corregir sentido de giro por software.
+    - Use el ejemplo 4 para montar un sistema XYZ con varios ejes independientes.
+    - Use el ejemplo 5 para una rutina de prueba completa antes de integrarlo con otros modulos del proyecto.
+
+
+15. ERRORES COMUNES AL INSTANCIAR
+
+    - Repetir sm_id en dos ejes. Cada eje que usa PIO necesita una StateMachine diferente.
+
+    - Usar pines repetidos para STEP, DIR, ENABLE o HOME entre ejes.
+
+    - No compartir GND entre la Raspberry Pi Pico y los drivers externos.
+
+    - Configurar microsteps en el codigo con un valor diferente al configurado fisicamente en el driver.
+
+    - No hacer HOME antes de mover. El modulo exige is_homed_flag=True para movimientos normales.
+
+    - Simular is_homed_flag=True y olvidar que eso no representa una referencia fisica real.
+
+    - Poner limites incorrectos, por ejemplo min_position_mm mayor o igual que max_position_mm.
+
+    - Confundir movimiento absoluto con relativo. move_to_mm(70.0) va a 70.0 mm absolutos; move_relative_mm(70.0) suma 70.0 mm a la posicion actual.
+
+    - Usar una velocidad demasiado alta para el motor, el driver, la carga o la mecanica.
+
+    - Configurar mal home_active_low y hacer que el sensor HOME se interprete invertido.
+
+    - Configurar mal home_direction y buscar HOME hacia el lado contrario.
+
+    - No configurar correctamente pulley_teeth, belt_pitch_mm o screw_lead_mm, lo que produce errores de escala en mm.
+
+    - Usar enable_active_low incorrecto y dejar el driver siempre deshabilitado o siempre habilitado.
+
+    - Intentar instanciar StepperAxisBase directamente, lo que falla porque _calculate_steps_per_mm() no esta implementado.
+
+
+16. CHECKLIST ANTES DE PROBAR EN HARDWARE REAL
+
+    - Driver conectado correctamente.
+
+    - Fuente del motor conectada y con voltaje/corriente adecuados.
+
+    - GND comun entre Pico, driver y fuente de senales.
+
+    - STEP, DIR y ENABLE revisados con el pinout real.
+
+    - Motor conectado al driver, no a la Pico.
+
+    - Corriente del driver ajustada antes de mover.
+
+    - Motor sin carga mecanica al inicio o con recorrido libre.
+
+    - Velocidad baja para la primera prueba.
+
+    - microsteps del codigo coinciden con microsteps del driver.
+
+    - Sensor HOME probado con is_home_active() antes de ejecutar home().
+
+    - Polaridad home_active_low revisada.
+
+    - home_direction revisado para que busque hacia el sensor correcto.
+
+    - Limites min_position_mm y max_position_mm revisados.
+
+    - Paro de emergencia disponible.
+
+    - Movimiento corto de prueba, por ejemplo 1 mm a 5 mm.
+
+    - Verificar que move_to_mm() es absoluto y move_relative_mm() es relativo.
+
+
+17. CONCLUSION
+
+Los ejemplos de este archivo muestran como crear y usar ejes lineales basados en objStepperAxis.py usando BeltStepperAxis para banda/polea y ScrewStepperAxis para tornillo/husillo.
+
+Se recomienda empezar con el ejemplo mas basico para entender la instanciacion y la lectura de estado. Despues se debe avanzar al ejemplo con HOME real, luego a limites e inversion de direccion, despues a varios ejes y finalmente al flujo completo.
+
+Todos los valores deben calibrarse segun el hardware real: pines, drivers, microsteps, poleas, banda, tornillo, velocidad, limites, polaridad de ENABLE y polaridad de HOME.
+
+Antes de operar una maquina real, siempre se debe probar el sensor HOME, usar velocidades bajas, confirmar GND comun, disponer de paro de emergencia y realizar movimientos cortos de validacion.
