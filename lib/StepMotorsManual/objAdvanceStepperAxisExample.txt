@@ -1,0 +1,2150 @@
+MANUAL TECNICO DEL ARCHIVO objAdvanceStepperAxis.py
+Control avanzado de un eje lineal con motor a pasos, PIO y perfiles de movimiento
+
+======================================================================
+1. TITULO DEL MANUAL
+======================================================================
+
+Manual tecnico del archivo: objAdvanceStepperAxis.py
+
+Descripcion breve:
+    Este archivo implementa un controlador avanzado para un eje lineal
+    individual de un sistema XYZ basado en Raspberry Pi Pico / RP2040 y
+    MicroPython. El modulo controla un motor a pasos mediante un driver
+    externo STEP/DIR/ENABLE, usa PIO para generar pulsos STEP precisos y
+    permite ejecutar movimientos absolutos o relativos con perfil de
+    velocidad constante, trapezoidal o triangular segmentado.
+
+
+======================================================================
+2. INTRODUCCION
+======================================================================
+
+El modulo objAdvanceStepperAxis.py sirve para representar y controlar un
+solo eje lineal avanzado de una maquina cartesiana X/Y/Z. Cada objeto de
+eje administra:
+
+    - Pines STEP, DIR y ENABLE hacia un driver externo.
+    - Sensor HOME opcional.
+    - Limites fisicos minimo y maximo en milimetros.
+    - Conversion entre milimetros y pasos.
+    - Estado logico del eje.
+    - Rutina de homing.
+    - Perfiles de movimiento avanzados.
+    - Segmentacion de movimientos para aproximar aceleracion y desaceleracion.
+    - Generacion de pulsos por PIO en el RP2040.
+
+Dentro del proyecto, este modulo pertenece al subsistema de control de ejes
+y control de movimiento avanzado. No es un controlador multi-eje completo,
+pero esta disenado para ser usado por modulos superiores, por ejemplo un
+controlador avanzado de movimiento, que coordinen varios ejes X, Y y Z.
+
+El archivo pertenece a las areas de:
+
+    - Control de ejes individuales.
+    - Control de movimiento avanzado.
+    - Perfil trapezoidal/triangular de velocidad.
+    - Uso de PIO para pulsos STEP.
+    - Sincronizacion indirecta mediante segmentos y tiempo de perfil.
+    - Homing con sensor de referencia.
+
+Problema que resuelve dentro de un sistema XYZ con Raspberry Pi Pico:
+    En una maquina cartesiana, el microcontrolador debe generar pulsos STEP
+    con frecuencia estable mientras mantiene la logica de posicion, limites,
+    sensores y perfiles de velocidad. Hacer todos los pulsos con bucles de
+    Python puede ser impreciso por la interpretacion de MicroPython. Este
+    modulo descarga la generacion exacta de pulsos al PIO del RP2040 y deja
+    a MicroPython la planificacion de segmentos, validacion y control del
+    estado del eje.
+
+
+======================================================================
+3. CONTEXTO GENERAL DEL PROYECTO
+======================================================================
+
+El proyecto consiste en controlar motores a pasos de un sistema cartesiano
+X/Y/Z. Este tipo de sistema puede ser una CNC ligera, una impresora 3D, una
+maquina de posicionamiento, una plataforma de laboratorio o cualquier equipo
+que requiera desplazamiento lineal coordinado.
+
+Plataforma de hardware prevista:
+
+    - Raspberry Pi Pico o placa compatible con RP2040.
+    - MicroPython como entorno de ejecucion.
+    - Drivers externos para motores a pasos, por ejemplo TB6600, TMC, DRV8825,
+      A4988 u otros compatibles.
+    - Senales digitales STEP, DIR y ENABLE.
+    - Sensores HOME o finales de carrera opcionales.
+
+Relacion con drivers externos:
+
+    - STEP: cada pulso representa un micro-paso o paso del motor.
+    - DIR: define el sentido de giro o desplazamiento.
+    - ENABLE: habilita o deshabilita la potencia del driver.
+
+Relacion con otros modulos del proyecto:
+
+    - objStepperAxis.py puede representar una version mas basica de eje.
+    - objMotionControler.py puede coordinar movimientos de ejes con logica
+      menos avanzada.
+    - objAdvanceMotionControler.py puede usar objetos de este archivo para
+      coordinar varios ejes de forma sincronizada.
+    - objAdvanceStepperAxis.py no implementa comunicacion serial, red,
+      interfaz grafica ni lectura de recetas; solo se ocupa de un eje.
+
+Uso de PIO:
+    El archivo si usa PIO. Se define un pequeno programa en ensamblador PIO
+    llamado step_pulse_pio(). PIO se usa porque el RP2040 puede generar pulsos
+    con temporizacion estable de hardware, independiente de las variaciones
+    del interprete MicroPython. El programa PIO recibe por FIFO la cantidad
+    de pulsos a emitir y produce pulsos en el pin STEP.
+
+Este archivo controla pines directamente porque representa un eje fisico.
+Sin embargo, no coordina multiples ejes por si solo. Para movimientos X/Y/Z
+simultaneos, un controlador superior debe crear varios objetos de eje y llamar
+sus metodos de movimiento y update() de manera coordinada.
+
+
+======================================================================
+4. RESUMEN DEL ARCHIVO
+======================================================================
+
+Cantidad de clases encontradas: 3
+
+Clases:
+
+    1) AdvancedStepperAxisBase
+       Clase base abstracta para un eje lineal avanzado. Contiene la logica
+       comun de hardware, estado, homing, PIO, limites, perfiles y movimiento.
+       No debe usarse directamente porque calculate_steps_per_mm() no esta
+       implementado.
+
+    2) AdvancedBeltStepperAxis
+       Clase concreta para un eje lineal movido por banda dentada y polea.
+       Calcula steps_per_mm usando pasos del motor, microsteps, dientes de la
+       polea y pitch de la banda.
+
+    3) AdvancedScrewStepperAxis
+       Clase concreta para un eje lineal movido por tornillo/husillo. Calcula
+       steps_per_mm usando pasos del motor, microsteps y avance del husillo.
+
+Constantes globales:
+
+    - STATE_NOT_HOMED = "NOT_HOMED"
+    - STATE_IDLE = "IDLE"
+    - STATE_MOVING = "MOVING"
+    - STATE_HOMING = "HOMING"
+    - STATE_ERROR = "ERROR"
+    - STATE_STOPPED = "STOPPED"
+    - PROFILE_CONSTANT = "CONSTANT"
+    - PROFILE_TRAPEZOIDAL = "TRAPEZOIDAL"
+    - PIO_CYCLES_PER_STEP = 4
+
+Funciones auxiliares globales:
+
+    - step_pulse_pio()
+      Programa PIO que genera pulsos STEP.
+
+Estructuras principales:
+
+    - Diccionarios de segmentos de perfil:
+          {"steps": cantidad_de_pasos, "speed_mm_s": velocidad_mm_s}
+
+    - Diccionario de estado retornado por get_status().
+
+
+======================================================================
+5. CANTIDAD DE CLASES
+======================================================================
+
+Numero total de clases: 3
+
+5.1 AdvancedStepperAxisBase
+    Responsabilidad:
+        Proveer toda la logica comun de un eje avanzado: inicializacion de
+        pines, PIO, validacion de parametros, estados, homing, conversiones,
+        perfiles de movimiento y ejecucion de segmentos.
+
+    Relacion:
+        Es clase base. Las clases hijas heredan de ella y solo deben aportar
+        la formula mecanica de steps_per_mm.
+
+5.2 AdvancedBeltStepperAxis
+    Responsabilidad:
+        Representar un eje con transmision por banda dentada. Agrega los
+        atributos pulley_teeth y belt_pitch_mm y calcula steps_per_mm.
+
+    Relacion:
+        Hereda de AdvancedStepperAxisBase.
+
+5.3 AdvancedScrewStepperAxis
+    Responsabilidad:
+        Representar un eje con transmision por tornillo/husillo. Agrega el
+        atributo screw_lead_mm y calcula steps_per_mm.
+
+    Relacion:
+        Hereda de AdvancedStepperAxisBase.
+
+Resumen de herencia:
+
+    AdvancedStepperAxisBase
+        |
+        +-- AdvancedBeltStepperAxis
+        |
+        +-- AdvancedScrewStepperAxis
+
+
+======================================================================
+6. CANTIDAD DE VARIABLES Y ATRIBUTOS PRINCIPALES
+======================================================================
+
+6.1 Constantes globales
+
+    Variables de estado:
+        STATE_NOT_HOMED
+            Indica que el eje no tiene referencia HOME valida.
+
+        STATE_IDLE
+            Indica que el eje esta listo y sin movimiento activo.
+
+        STATE_MOVING
+            Indica que el eje ejecuta un movimiento normal.
+
+        STATE_HOMING
+            Indica que el eje ejecuta la rutina de busqueda de HOME.
+
+        STATE_ERROR
+            Indica que ocurrio un error que impide continuar normalmente.
+
+        STATE_STOPPED
+            Indica que se ejecuto stop() y la posicion ya no es confiable.
+
+    Variables de perfil:
+        PROFILE_CONSTANT
+            Movimiento con una unica velocidad constante.
+
+        PROFILE_TRAPEZOIDAL
+            Movimiento segmentado con aceleracion, crucero y desaceleracion.
+            Si la distancia no permite alcanzar la velocidad maxima, el perfil
+            se comporta como triangular.
+
+    Variable de PIO:
+        PIO_CYCLES_PER_STEP
+            Indica que cada pulso STEP consume 4 ciclos del programa PIO:
+            set alto, nop, set bajo y salto condicional.
+
+6.2 Atributos de AdvancedStepperAxisBase
+
+    Variables de configuracion:
+
+        name
+            Nombre logico del eje, por ejemplo "X", "Y" o "Z".
+
+        motor_steps_per_rev
+            Pasos completos del motor por revolucion. Valor tipico: 200.
+
+        microsteps
+            Microstepping configurado en el driver. Valores tipicos: 1, 2, 4,
+            8, 16, 32.
+
+        max_speed_mm_s
+            Velocidad maxima permitida del eje en mm/s.
+
+        acceleration_mm_s2
+            Aceleracion maxima en mm/s2.
+
+        deceleration_mm_s2
+            Desaceleracion maxima en mm/s2.
+
+        min_speed_mm_s
+            Velocidad minima usada para evitar frecuencias PIO demasiado bajas
+            o segmentos con velocidad cero.
+
+        profile_segment_time_s
+            Duracion aproximada de cada segmento del perfil trapezoidal.
+            Valores pequenos generan perfiles mas suaves, pero mas segmentos.
+
+        min_position_mm
+            Limite minimo permitido en milimetros.
+
+        max_position_mm
+            Limite maximo permitido en milimetros.
+
+        home_direction
+            Direccion de busqueda del HOME. Se normaliza a -1 o +1.
+
+        home_speed_mm_s
+            Velocidad de busqueda del sensor HOME.
+
+        home_backoff_mm
+            Distancia de retroceso despues de tocar el sensor HOME.
+
+        invert_direction
+            Invierte la logica del pin DIR si el eje se mueve al reves.
+
+        enable_active_low
+            Define si ENABLE se activa con nivel bajo.
+
+        home_active_low
+            Define si el sensor HOME se considera activo con nivel bajo.
+
+        steps_per_mm
+            Conversion calculada por la clase hija. Es esencial para convertir
+            mm a pasos.
+
+    Variables de hardware:
+
+        step_pin_number
+            Numero GPIO usado para STEP.
+
+        dir_pin_number
+            Numero GPIO usado para DIR.
+
+        enable_pin_number
+            Numero GPIO usado para ENABLE.
+
+        home_pin_number
+            Numero GPIO usado para HOME, o None si no hay sensor.
+
+        sm_id
+            Identificador de la StateMachine PIO.
+
+        step_pin
+            Objeto machine.Pin para STEP.
+
+        dir_pin
+            Objeto machine.Pin para DIR.
+
+        enable_pin
+            Objeto machine.Pin para ENABLE.
+
+        home_pin
+            Objeto machine.Pin para HOME, o None.
+
+        sm
+            Objeto rp2.StateMachine que ejecuta step_pulse_pio().
+
+    Variables de estado:
+
+        current_position_mm
+            Posicion logica actual en milimetros.
+
+        current_position_steps
+            Posicion logica actual en pasos.
+
+        target_position_mm
+            Objetivo absoluto actual o ultimo objetivo en milimetros.
+
+        target_position_steps
+            Objetivo absoluto actual o ultimo objetivo en pasos.
+
+        state
+            Estado publico del eje: NOT_HOMED, IDLE, MOVING, HOMING, ERROR o
+            STOPPED.
+
+        is_homed_flag
+            Bandera booleana que indica si la posicion es confiable por HOME.
+
+        _enabled
+            Bandera interna que indica si el driver esta habilitado.
+
+        error
+            Mensaje de error actual o None.
+
+    Variables de movimiento y perfil:
+
+        _profile_segments
+            Lista de segmentos del perfil activo. Cada segmento tiene steps y
+            speed_mm_s.
+
+        _current_segment_index
+            Indice del segmento actualmente activo.
+
+        _current_segment_steps
+            Cantidad de pasos del segmento activo.
+
+        _completed_profile_steps
+            Pasos acumulados de segmentos completados.
+
+        _move_total_steps
+            Pasos totales del movimiento planificado.
+
+        _move_direction_sign
+            Sentido del movimiento actual: +1 o -1.
+
+        _move_start_position_steps
+            Posicion inicial del movimiento en pasos.
+
+        _move_start_position_mm
+            Posicion inicial del movimiento en mm.
+
+        _move_done
+            Bandera interna usada para movimientos bloqueantes y HOME.
+
+        _segment_done
+            Bandera interna que indica que PIO termino el segmento actual.
+
+        _active_profile_mode
+            Perfil activo: CONSTANT o TRAPEZOIDAL.
+
+        _requested_total_time_s
+            Tiempo total solicitado por el usuario, si fue indicado.
+
+        _planned_total_time_s
+            Tiempo aproximado calculado sumando la duracion de los segmentos.
+
+6.3 Atributos de AdvancedBeltStepperAxis
+
+    Variables de configuracion mecanica:
+
+        pulley_teeth
+            Numero de dientes de la polea motriz. Valor tipico en impresoras
+            tipo Ender 3 V2: 20 dientes.
+
+        belt_pitch_mm
+            Paso de la banda en mm por diente. Valor tipico GT2: 2.0 mm.
+
+    Relacion con steps_per_mm:
+        steps_per_mm = (motor_steps_per_rev * microsteps) /
+                       (pulley_teeth * belt_pitch_mm)
+
+    Ejemplo tipico:
+        motor_steps_per_rev = 200
+        microsteps = 16
+        pulley_teeth = 20
+        belt_pitch_mm = 2.0
+        steps_per_mm = 200 * 16 / (20 * 2) = 80 steps/mm
+
+6.4 Atributos de AdvancedScrewStepperAxis
+
+    Variables de configuracion mecanica:
+
+        screw_lead_mm
+            Avance lineal del husillo por revolucion. Valores tipicos:
+            8.0 mm/rev para eje Z tipo Ender 3 V2 con varilla T8.
+
+    Relacion con steps_per_mm:
+        steps_per_mm = (motor_steps_per_rev * microsteps) / screw_lead_mm
+
+    Ejemplo tipico:
+        motor_steps_per_rev = 200
+        microsteps = 16
+        screw_lead_mm = 8.0
+        steps_per_mm = 200 * 16 / 8 = 400 steps/mm
+
+
+======================================================================
+7. ENTRADAS DEL MODULO
+======================================================================
+
+7.1 Entradas globales del modulo
+
+El modulo recibe configuracion mediante constructores de clase y parametros
+de metodos. Tambien recibe senales fisicas desde el sensor HOME y produce
+pulsos hacia hardware externo.
+
+Entradas importadas:
+
+    - machine.Pin
+      Usado para controlar GPIO.
+
+    - rp2
+      Usado para PIO y StateMachine.
+
+    - time
+      Usado para esperas con sleep_ms().
+
+    - math
+      Usado para calculos de perfiles.
+
+7.2 Constructor de AdvancedStepperAxisBase
+
+Aunque normalmente no se instancia directamente, sus parametros son heredados
+por AdvancedBeltStepperAxis y AdvancedScrewStepperAxis.
+
+Parametros obligatorios:
+
+    name
+        Tipo esperado: str o convertible a str.
+        Ejemplos: "X", "Y", "Z".
+        Uso: identifica el eje en estados y diagnostico.
+
+    step_pin
+        Tipo esperado: int.
+        Ejemplos: 2, 3, 10.
+        Uso: GPIO que entrega pulsos STEP al driver.
+
+    dir_pin
+        Tipo esperado: int.
+        Uso: GPIO que define la direccion de movimiento.
+
+    enable_pin
+        Tipo esperado: int.
+        Uso: GPIO que habilita o deshabilita el driver.
+
+    sm_id
+        Tipo esperado: int.
+        Ejemplos: 0 a 7 en RP2040, segun disponibilidad.
+        Uso: numero de StateMachine PIO.
+
+Parametros opcionales de configuracion del motor:
+
+    motor_steps_per_rev=200
+        Tipo: int.
+        Valor tipico: 200 para motor de 1.8 grados por paso.
+
+    microsteps=1
+        Tipo: int.
+        Valores validos tipicos: 1, 2, 4, 8, 16, 32.
+        Para Ender 3 V2 es comun usar 16 microsteps.
+
+Parametros opcionales de perfil:
+
+    max_speed_mm_s=100.0
+        Tipo: float.
+        Velocidad maxima.
+        Valores iniciales recomendados para pruebas:
+            X/Y por banda: 20 a 50 mm/s.
+            Z por husillo: 1 a 5 mm/s.
+
+    acceleration_mm_s2=100.0
+        Tipo: float.
+        Aceleracion del perfil.
+
+    deceleration_mm_s2=100.0
+        Tipo: float.
+        Desaceleracion del perfil.
+
+    min_speed_mm_s=1.0
+        Tipo: float.
+        Velocidad minima usada al crear segmentos.
+
+    profile_segment_time_s=0.02
+        Tipo: float.
+        Duracion aproximada del segmento en segundos. 0.02 s equivale a 20 ms.
+
+Parametros opcionales de limites:
+
+    min_position_mm=0.0
+        Tipo: float.
+        Limite minimo del eje.
+
+    max_position_mm=100.0
+        Tipo: float.
+        Limite maximo del eje.
+        Valores tipicos Ender 3 V2:
+            X: 220 mm aproximadamente.
+            Y: 220 mm aproximadamente.
+            Z: 250 mm aproximadamente.
+
+Parametros opcionales de HOME:
+
+    home_pin=None
+        Tipo: int o None.
+        GPIO del sensor HOME. Si es None, home() fallara porque no hay sensor.
+
+    home_direction=-1
+        Tipo: int.
+        Se normaliza a -1 o +1.
+        Indica hacia donde se mueve el eje para buscar el sensor.
+
+    home_speed_mm_s=5.0
+        Tipo: float.
+        Velocidad de homing.
+
+    home_backoff_mm=2.0
+        Tipo: float.
+        Retroceso despues de detectar HOME.
+
+Parametros opcionales de logica electrica:
+
+    invert_direction=False
+        Tipo: bool.
+        Usar True si el eje se desplaza al lado contrario del esperado.
+
+    enable_active_low=True
+        Tipo: bool.
+        Muchos drivers activan ENABLE con nivel bajo.
+
+    home_active_low=True
+        Tipo: bool.
+        Muchos finales de carrera con pull-up activo se leen como 0 al activar.
+
+7.3 Constructor de AdvancedBeltStepperAxis
+
+Parametros adicionales:
+
+    pulley_teeth=20
+        Tipo: int.
+        Dientes de la polea.
+        Valor tipico GT2: 20.
+
+    belt_pitch_mm=2.0
+        Tipo: float.
+        Paso de banda en mm.
+        Valor tipico GT2: 2.0.
+
+Tambien recibe todos los parametros de AdvancedStepperAxisBase mediante *args
+y **kwargs.
+
+7.4 Constructor de AdvancedScrewStepperAxis
+
+Parametro adicional:
+
+    screw_lead_mm=8.0
+        Tipo: float.
+        Avance del husillo en mm/rev.
+        Valor tipico para T8 de 4 entradas: 8.0 mm/rev.
+
+Tambien recibe todos los parametros de AdvancedStepperAxisBase mediante *args
+y **kwargs.
+
+7.5 Parametros de metodos principales
+
+    validate_target(target_mm)
+        target_mm: float convertible. Destino absoluto a validar.
+
+    calculate_minimum_time_s(distance_mm)
+        distance_mm: float convertible. Distancia a evaluar; puede tener signo.
+
+    create_trapezoidal_profile(distance_mm, total_time_s=None)
+        distance_mm: float convertible. Distancia positiva o negativa.
+        total_time_s: float opcional. Si se indica y es mayor al minimo,
+                      reduce la velocidad pico para aproximar ese tiempo.
+
+    create_constant_profile(distance_mm, speed_mm_s=None)
+        distance_mm: float convertible.
+        speed_mm_s: float opcional. Si no se indica, usa max_speed_mm_s.
+
+    start_move_to_mm(target_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                     total_time_s=None)
+        target_mm: destino absoluto en mm.
+        profile_mode: "CONSTANT" o "TRAPEZOIDAL".
+        total_time_s: tiempo total deseado opcional.
+
+    move_to_mm(target_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+               total_time_s=None)
+        Igual que start_move_to_mm(), pero bloqueante.
+
+    start_move_relative_mm(distance_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                           total_time_s=None)
+        distance_mm: desplazamiento relativo en mm.
+
+    move_relative_mm(distance_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                     total_time_s=None)
+        Igual que start_move_relative_mm(), pero bloqueante.
+
+    _run_steps_blocking(steps, direction_sign, speed_mm_s, stop_on_home=False)
+        Metodo interno para homing.
+        steps: int.
+        direction_sign: +1 o -1.
+        speed_mm_s: float.
+        stop_on_home: bool.
+
+
+======================================================================
+8. SALIDAS DEL MODULO
+======================================================================
+
+8.1 Salidas fisicas
+
+    - Pulsos STEP generados por PIO en step_pin.
+    - Nivel logico DIR en dir_pin.
+    - Nivel logico ENABLE en enable_pin.
+
+8.2 Retornos de metodos
+
+    step_pulse_pio()
+        No retorna valores a Python. Genera pulsos en hardware PIO y emite IRQ
+        al terminar.
+
+    init_pio()
+        Retorna el objeto rp2.StateMachine creado.
+
+    is_home_active()
+        Retorna bool.
+        True si el sensor HOME esta activo segun home_active_low.
+
+    enable()
+        No retorna valor explicito. Cambia ENABLE y _enabled.
+
+    disable()
+        No retorna valor explicito. Cambia ENABLE y _enabled.
+
+    validate_target(target_mm)
+        Retorna True si el destino esta dentro de limites.
+        Retorna False si el destino es invalido y deja state=ERROR.
+
+    get_position()
+        Retorna float con la posicion actual en mm.
+
+    is_homed()
+        Retorna bool. True si el eje tiene HOME valido.
+
+    is_busy()
+        Retorna bool. True si state es MOVING o HOMING.
+
+    get_status()
+        Retorna dict con estado completo observable del eje.
+
+    calculate_minimum_time_s(distance_mm)
+        Retorna float con el tiempo minimo teorico en segundos.
+
+    create_trapezoidal_profile(distance_mm, total_time_s=None)
+        Retorna lista de diccionarios de segmentos.
+        Ejemplo:
+            [
+                {"steps": 10, "speed_mm_s": 5.0},
+                {"steps": 40, "speed_mm_s": 20.0},
+                {"steps": 10, "speed_mm_s": 5.0}
+            ]
+
+    create_constant_profile(distance_mm, speed_mm_s=None)
+        Retorna lista con un segmento o lista vacia si no hay pasos.
+
+    start_move_to_mm(...)
+        Retorna True si el movimiento se inicio correctamente.
+        Retorna False si hay error, eje ocupado, sin HOME, limite invalido o
+        perfil invalido.
+        Es no bloqueante.
+
+    move_to_mm(...)
+        Retorna True si termina en IDLE.
+        Retorna False si no se pudo iniciar o termino en otro estado.
+        Es bloqueante.
+
+    start_move_relative_mm(...)
+        Retorna True o False, igual que start_move_to_mm().
+        Es no bloqueante.
+
+    move_relative_mm(...)
+        Retorna True o False.
+        Es bloqueante.
+
+    update()
+        Retorna True si el eje sigue en movimiento.
+        Retorna False si no esta moviendo o si acaba de finalizar.
+        Avanza al siguiente segmento cuando PIO termina el actual.
+
+    wait_until_done()
+        Retorna el estado final del eje.
+        Es bloqueante.
+
+    home()
+        Retorna True si el homing finalizo correctamente.
+        Retorna False si no hay home_pin, el eje esta ocupado o no encontro el
+        sensor.
+
+    stop()
+        Retorna True despues de detener PIO, deshabilitar driver y marcar la
+        posicion como no confiable.
+
+8.3 Interpretacion de estados internos
+
+    get_status()["state"]
+        NOT_HOMED:
+            El eje aun no tiene referencia. No debe moverse con movimientos
+            normales.
+
+        IDLE:
+            El eje esta referenciado y listo.
+
+        MOVING:
+            Se ejecuta un perfil de movimiento.
+
+        HOMING:
+            Se ejecuta la rutina de HOME.
+
+        ERROR:
+            Hubo una condicion invalida. Revisar get_status()["error"].
+
+        STOPPED:
+            Se detuvo manualmente. La posicion debe considerarse no confiable
+            hasta repetir HOME.
+
+    get_status()["position_mm"]
+        Posicion logica actual. Durante un movimiento segmentado, el codigo
+        consolida la posicion al final del perfil, no continuamente en cada
+        pulso.
+
+    get_status()["homed"]
+        True significa que home() fue exitoso y no se ha llamado stop().
+
+    get_status()["busy"]
+        True significa que el eje esta en MOVING o HOMING.
+
+    get_status()["error"]
+        None si no hay error; texto descriptivo si state es ERROR.
+
+
+======================================================================
+9. CLASES DEL ARCHIVO
+======================================================================
+
+9.1 AdvancedStepperAxisBase
+
+    Proposito:
+        Concentrar la logica comun de un eje lineal avanzado: validacion,
+        hardware, PIO, limites, HOME, perfiles y movimientos.
+
+    Cuándo se debe usar:
+        No se recomienda instanciarla directamente porque calculate_steps_per_mm()
+        lanza NotImplementedError. Debe usarse como base para clases concretas
+        con una formula mecanica definida.
+
+    Que objetos representa:
+        Un eje lineal fisico con motor a pasos, driver externo, limite de
+        recorrido y sensor HOME opcional.
+
+    Parametros del constructor:
+        Ver seccion 7.2. Incluyen nombre, pines, StateMachine, parametros del
+        motor, velocidades, aceleracion, limites, HOME e inversiones logicas.
+
+    Atributos internos principales:
+        - steps_per_mm
+        - current_position_mm
+        - current_position_steps
+        - target_position_mm
+        - target_position_steps
+        - state
+        - error
+        - is_homed_flag
+        - _profile_segments
+        - _current_segment_index
+        - _segment_done
+        - _move_done
+        - sm
+
+    Metodos principales:
+        - init_pio()
+        - home()
+        - start_move_to_mm()
+        - move_to_mm()
+        - start_move_relative_mm()
+        - move_relative_mm()
+        - update()
+        - wait_until_done()
+        - stop()
+        - get_status()
+        - get_position()
+
+    Metodos secundarios o internos:
+        - _validate_constructor_values()
+        - calculate_steps_per_mm()
+        - _on_pio_done()
+        - _set_error()
+        - _clear_error()
+        - _mm_to_steps()
+        - _steps_to_mm()
+        - _speed_to_pio_freq()
+        - _write_direction()
+        - _is_home_active()
+        - _profile_peak_speed_for_time()
+        - _speed_at_time()
+        - _distance_at_time()
+        - _append_segment()
+        - _start_segment()
+        - _finish_move()
+        - _run_steps_blocking()
+        - _mark_internal_move_done()
+
+    Flujo tipico de uso:
+        1) Crear una clase hija concreta.
+        2) Verificar wiring STEP/DIR/ENABLE/HOME.
+        3) Ejecutar home().
+        4) Ejecutar move_to_mm() o start_move_to_mm().
+        5) Si el movimiento es no bloqueante, llamar update() periodicamente.
+        6) Leer get_status() para diagnostico.
+        7) Usar stop() ante emergencia o prueba fallida.
+
+    Errores comunes:
+        - Instanciar AdvancedStepperAxisBase directamente.
+        - Intentar mover sin HOME.
+        - Configurar limites incorrectos.
+        - Usar home_pin=None y luego llamar home().
+        - Elegir mal invert_direction o home_active_low.
+        - Usar dos ejes con el mismo sm_id.
+
+    Recomendaciones de uso:
+        - Usar AdvancedBeltStepperAxis para X/Y por banda.
+        - Usar AdvancedScrewStepperAxis para Z por husillo.
+        - Probar primero a baja velocidad.
+        - Validar manualmente que DIR positivo corresponde al sentido esperado.
+        - Repetir HOME despues de stop().
+
+9.2 AdvancedBeltStepperAxis
+
+    Proposito:
+        Controlar un eje lineal accionado por banda dentada y polea.
+
+    Cuándo se debe usar:
+        Para ejes X/Y de impresoras 3D tipo Ender 3, CoreXY, cartesianos por
+        banda GT2 o mecanismos similares.
+
+    Que objetos representa:
+        Un eje fisico donde cada revolucion del motor avanza:
+            pulley_teeth * belt_pitch_mm
+        milimetros lineales.
+
+    Parametros del constructor:
+        Adicionales a los de AdvancedStepperAxisBase:
+            pulley_teeth=20
+            belt_pitch_mm=2.0
+
+    Atributos internos principales:
+        - pulley_teeth
+        - belt_pitch_mm
+        - todos los heredados de AdvancedStepperAxisBase.
+
+    Metodos principales:
+        - calculate_steps_per_mm()
+        - get_status()
+        - todos los metodos de movimiento heredados.
+
+    Metodos secundarios:
+        No agrega metodos secundarios propios. Reutiliza los de la base.
+
+    Flujo tipico de uso:
+        1) Crear el eje con pines, limites y parametros de banda.
+        2) Confirmar que steps_per_mm sea coherente.
+        3) Ejecutar home().
+        4) Ejecutar movimientos absolutos o relativos.
+
+    Errores comunes:
+        - pulley_teeth incorrecto.
+        - belt_pitch_mm incorrecto.
+        - microsteps distinto al configurado fisicamente en el driver.
+
+    Recomendaciones de uso:
+        - Para GT2 con polea de 20 dientes y motor 200 pasos/rev a 16
+          microsteps, esperar 80 steps/mm.
+        - Si el movimiento real no coincide con el solicitado, revisar
+          microsteps, dientes de polea y tension de banda.
+
+9.3 AdvancedScrewStepperAxis
+
+    Proposito:
+        Controlar un eje lineal accionado por tornillo o husillo.
+
+    Cuándo se debe usar:
+        Para ejes Z de impresoras 3D, elevadores lineales, actuadores con
+        varilla roscada o husillo T8.
+
+    Que objetos representa:
+        Un eje fisico donde cada revolucion del motor avanza screw_lead_mm
+        milimetros lineales.
+
+    Parametros del constructor:
+        Adicionales a los de AdvancedStepperAxisBase:
+            screw_lead_mm=8.0
+
+    Atributos internos principales:
+        - screw_lead_mm
+        - todos los heredados de AdvancedStepperAxisBase.
+
+    Metodos principales:
+        - calculate_steps_per_mm()
+        - get_status()
+        - todos los metodos de movimiento heredados.
+
+    Metodos secundarios:
+        No agrega metodos secundarios propios. Reutiliza los de la base.
+
+    Flujo tipico de uso:
+        1) Crear el eje con pines, limites y avance de husillo.
+        2) Ejecutar home() a baja velocidad.
+        3) Ejecutar movimientos pequenos para verificar sentido y escala.
+        4) Aumentar gradualmente velocidad/aceleracion.
+
+    Errores comunes:
+        - Confundir pitch de rosca con lead real.
+        - Usar velocidades de X/Y en un eje Z lento.
+        - No considerar que el husillo puede atascarse mecanicamente.
+
+    Recomendaciones de uso:
+        - Para un T8 de 8 mm/rev con 200 pasos/rev y 16 microsteps, esperar
+          400 steps/mm.
+        - Usar velocidades iniciales bajas, por ejemplo 1 a 3 mm/s.
+
+
+======================================================================
+10. FUNCIONES Y METODOS
+======================================================================
+
+10.1 step_pulse_pio()
+    Clase: ninguna, funcion/programa PIO global.
+    Proposito: generar N pulsos STEP y disparar una IRQ al terminar.
+    Entradas: recibe por FIFO el valor steps - 1.
+    Salidas: pulsos STEP fisicos e IRQ relativa.
+    Efectos internos: usa registro X de PIO y set(pins, 1/0).
+    Bloqueante: no desde Python; se ejecuta en PIO.
+    Dependencias: usado por rp2.StateMachine.
+    Errores: requiere que StateMachine este bien configurada con set_base.
+
+10.2 __init__()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: inicializar configuracion, pines, estado, PIO y variables.
+    Entradas: ver seccion 7.2.
+    Salidas: instancia configurada o excepcion ValueError.
+    Efectos internos: valida parametros, calcula steps_per_mm, crea Pin, llama
+    disable() e init_pio().
+    Bloqueante: breve, no ejecuta movimiento.
+    Dependencias: _validate_constructor_values(), calculate_steps_per_mm(),
+    init_pio().
+    Errores: parametros invalidos o calculate_steps_per_mm() no implementado.
+
+10.3 _validate_constructor_values()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: validar parametros numericos del constructor.
+    Entradas: atributos ya cargados.
+    Salidas: None si todo es valido; ValueError si algo es invalido.
+    Efectos internos: no modifica movimiento.
+    Bloqueante: no.
+    Dependencias: ninguna externa.
+    Errores: motor_steps_per_rev <= 0, microsteps <= 0, velocidades invalidas,
+    limites invertidos, home_speed invalida.
+
+10.4 calculate_steps_per_mm()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: metodo abstracto para calcular pasos por mm.
+    Entradas: atributos mecanicos.
+    Salidas: debe retornar float positivo en clases hijas.
+    Efectos internos: ninguno.
+    Bloqueante: no.
+    Dependencias: implementacion hija.
+    Errores: en la base lanza NotImplementedError.
+
+10.5 init_pio()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: crear y configurar la StateMachine PIO.
+    Entradas: sm_id, step_pin, min_speed_mm_s.
+    Salidas: objeto StateMachine.
+    Efectos internos: asigna self.sm, configura IRQ y deja SM inactiva.
+    Bloqueante: no.
+    Dependencias: _speed_to_pio_freq(), step_pulse_pio().
+    Errores: sm_id invalido o conflicto con otra StateMachine.
+
+10.6 _on_pio_done(state_machine)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: callback IRQ cuando termina un segmento.
+    Entradas: state_machine.
+    Salidas: ninguna.
+    Efectos internos: pone _segment_done=True.
+    Bloqueante: no.
+    Dependencias: PIO IRQ.
+    Errores: no genera error por si mismo.
+
+10.7 _set_error(message)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: registrar error y detener logica de movimiento.
+    Entradas: message convertible a str.
+    Salidas: False.
+    Efectos internos: error, state=ERROR, _move_done=True, _segment_done=True.
+    Bloqueante: no.
+    Dependencias: ninguna.
+    Errores: no lanza normalmente.
+
+10.8 _clear_error()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: limpiar mensaje de error.
+    Entradas: ninguna.
+    Salidas: ninguna.
+    Efectos internos: error=None.
+    Bloqueante: no.
+
+10.9 _mm_to_steps(mm_value)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: convertir mm a pasos redondeados.
+    Entradas: mm_value float convertible.
+    Salidas: int.
+    Efectos internos: ninguno.
+    Bloqueante: no.
+    Dependencias: steps_per_mm.
+
+10.10 _steps_to_mm(steps)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: convertir pasos a mm.
+    Entradas: steps numerico.
+    Salidas: float.
+    Efectos internos: ninguno.
+    Bloqueante: no.
+    Dependencias: steps_per_mm.
+
+10.11 _speed_to_pio_freq(speed_mm_s)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: calcular frecuencia PIO para una velocidad lineal.
+    Entradas: speed_mm_s float.
+    Salidas: int con frecuencia en Hz para StateMachine.
+    Efectos internos: ninguno.
+    Bloqueante: no.
+    Dependencias: steps_per_mm y PIO_CYCLES_PER_STEP.
+
+10.12 _write_direction(direction_sign)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: escribir DIR segun signo e inversion.
+    Entradas: direction_sign, normalmente +1 o -1.
+    Salidas: ninguna.
+    Efectos internos: cambia dir_pin.
+    Bloqueante: no.
+
+10.13 _is_home_active()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: leer el sensor HOME aplicando logica activa alta/baja.
+    Entradas: ninguna.
+    Salidas: bool.
+    Efectos internos: ninguno.
+    Bloqueante: no.
+
+10.14 is_home_active()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: metodo publico para consultar HOME.
+    Entradas: ninguna.
+    Salidas: bool.
+    Efectos internos: ninguno.
+    Dependencias: _is_home_active().
+
+10.15 enable()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: habilitar el driver.
+    Entradas: ninguna.
+    Salidas: ninguna explicita.
+    Efectos internos: escribe enable_pin y _enabled=True.
+    Bloqueante: no.
+
+10.16 disable()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: deshabilitar el driver.
+    Entradas: ninguna.
+    Salidas: ninguna explicita.
+    Efectos internos: escribe enable_pin y _enabled=False.
+    Bloqueante: no.
+
+10.17 validate_target(target_mm)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: validar que un destino absoluto este dentro de limites.
+    Entradas: target_mm float convertible.
+    Salidas: True o False.
+    Efectos internos: si falla llama _set_error().
+    Bloqueante: no.
+    Errores: destino menor que min_position_mm o mayor que max_position_mm.
+
+10.18 get_position()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: retornar posicion actual en mm.
+    Entradas: ninguna.
+    Salidas: float.
+    Efectos internos: ninguno.
+
+10.19 is_homed()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: indicar si el eje esta referenciado.
+    Entradas: ninguna.
+    Salidas: bool.
+
+10.20 is_busy()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: indicar si el eje esta MOVING o HOMING.
+    Entradas: ninguna.
+    Salidas: bool.
+
+10.21 get_status()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: generar un diccionario de diagnostico completo.
+    Entradas: ninguna.
+    Salidas: dict.
+    Efectos internos: no modifica estado.
+
+10.22 calculate_minimum_time_s(distance_mm)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: calcular tiempo minimo teorico para una distancia usando vmax,
+    aceleracion y desaceleracion.
+    Entradas: distance_mm float.
+    Salidas: float en segundos.
+    Efectos internos: ninguno.
+    Modifica perfil: no.
+    Bloqueante: no.
+
+10.23 _profile_peak_speed_for_time(distance_mm, total_time_s)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: calcular velocidad pico/crucero necesaria para cubrir distancia
+    en un tiempo total solicitado.
+    Entradas: distance_mm y total_time_s.
+    Salidas: float speed.
+    Efectos internos: ninguno.
+    Dependencias: calculate_minimum_time_s().
+
+10.24 _speed_at_time(elapsed_s, peak_speed, accel_time, cruise_time)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: obtener la velocidad teorica en un instante del perfil.
+    Entradas: tiempo transcurrido, velocidad pico, tiempo de aceleracion y
+    tiempo de crucero.
+    Salidas: float velocidad.
+
+10.25 _distance_at_time(elapsed_s, peak_speed, accel_time, cruise_time)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: calcular distancia acumulada en un instante del perfil.
+    Entradas: tiempo y parametros del perfil.
+    Salidas: float distancia acumulada.
+
+10.26 _append_segment(segments, steps, speed_mm_s)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: agregar un segmento al perfil, fusionando con el anterior si
+    tiene la misma velocidad.
+    Entradas: lista segments, steps int, speed_mm_s float.
+    Salidas: ninguna explicita.
+    Efectos internos: modifica la lista segments.
+
+10.27 create_trapezoidal_profile(distance_mm, total_time_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: construir una lista de segmentos para perfil trapezoidal o
+    triangular cuantizado en pasos.
+    Entradas: distancia y tiempo total opcional.
+    Salidas: lista de segmentos.
+    Efectos internos: no inicia movimiento; solo planifica.
+    Bloqueante: no.
+    Dependencias: calculate_minimum_time_s(), _profile_peak_speed_for_time(),
+    _speed_at_time(), _distance_at_time(), _append_segment().
+
+10.28 create_constant_profile(distance_mm, speed_mm_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: crear un perfil de un solo segmento a velocidad constante.
+    Entradas: distancia y velocidad opcional.
+    Salidas: lista con un segmento o lista vacia.
+    Efectos internos: no inicia movimiento.
+
+10.29 _start_segment(segment)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: configurar PIO y arrancar el segmento actual.
+    Entradas: diccionario con steps y speed_mm_s.
+    Salidas: True si se inicio, False si steps <= 0.
+    Efectos internos: configura frecuencia PIO, activa SM y envia steps-1.
+    Bloqueante: no; PIO trabaja en paralelo.
+
+10.30 _finish_move()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: cerrar movimiento completo y consolidar posicion.
+    Entradas: ninguna.
+    Salidas: ninguna.
+    Efectos internos: desactiva PIO, asigna current_position al target, cambia
+    state a IDLE o NOT_HOMED.
+
+10.31 start_move_to_mm(target_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                       total_time_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: iniciar movimiento absoluto no bloqueante.
+    Entradas: destino, perfil y tiempo opcional.
+    Salidas: True o False.
+    Efectos internos: valida HOME y limites, crea perfil, habilita driver,
+    escribe direccion y arranca primer segmento.
+    Modifica posicion: al final mediante _finish_move(); al inicio define target.
+    Bloqueante: no.
+    Dependencias: validate_target(), create_constant_profile(),
+    create_trapezoidal_profile(), _write_direction(), _start_segment().
+    Errores: eje ocupado, eje sin HOME, limite invalido, perfil invalido.
+
+10.32 move_to_mm(target_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                 total_time_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: movimiento absoluto bloqueante.
+    Entradas: iguales a start_move_to_mm().
+    Salidas: True si termina IDLE, False si falla.
+    Efectos internos: inicia movimiento y espera hasta terminar.
+    Bloqueante: si.
+    Dependencias: start_move_to_mm(), wait_until_done().
+
+10.33 start_move_relative_mm(distance_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                             total_time_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: iniciar movimiento relativo no bloqueante.
+    Entradas: desplazamiento relativo, perfil y tiempo opcional.
+    Salidas: True o False.
+    Efectos internos: calcula destino = current_position_mm + distance_mm.
+    Bloqueante: no.
+    Dependencias: start_move_to_mm().
+
+10.34 move_relative_mm(distance_mm, profile_mode=PROFILE_TRAPEZOIDAL,
+                       total_time_s=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: movimiento relativo bloqueante.
+    Entradas: desplazamiento relativo, perfil y tiempo opcional.
+    Salidas: True o False.
+    Efectos internos: inicia movimiento relativo y espera.
+    Bloqueante: si.
+    Dependencias: start_move_relative_mm(), wait_until_done().
+
+10.35 update()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: avanzar de segmento cuando PIO informa fin del segmento actual.
+    Entradas: ninguna.
+    Salidas: True si sigue moviendo, False si no mueve o termino.
+    Efectos internos: acumula pasos, arranca siguiente segmento o llama
+    _finish_move().
+    Bloqueante: no.
+    Dependencias: _start_segment(), _finish_move().
+
+10.36 wait_until_done()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: esperar hasta que is_busy() sea False.
+    Entradas: ninguna.
+    Salidas: estado final.
+    Efectos internos: llama update() cada 1 ms.
+    Bloqueante: si.
+    Dependencias: is_busy(), update(), time.sleep_ms().
+
+10.37 _run_steps_blocking(steps, direction_sign, speed_mm_s,
+                          stop_on_home=False)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: emitir pasos bloqueantes, usado principalmente por home().
+    Entradas: pasos, direccion, velocidad y bandera de parada por HOME.
+    Salidas: True si completo o encontro HOME; False si no encontro HOME.
+    Efectos internos: habilita driver, escribe DIR, ejecuta bloques PIO cortos.
+    Bloqueante: si.
+    Dependencias: _is_home_active(), _write_direction(), _speed_to_pio_freq(),
+    _mark_internal_move_done().
+
+10.38 _mark_internal_move_done(state_machine=None)
+    Clase: AdvancedStepperAxisBase.
+    Proposito: callback para movimientos internos bloqueantes.
+    Entradas: StateMachine opcional.
+    Salidas: ninguna.
+    Efectos internos: _move_done=True y _segment_done=True.
+
+10.39 home()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: ejecutar rutina de referencia HOME.
+    Entradas: ninguna directa; usa home_pin y parametros HOME.
+    Salidas: True si HOME correcto, False si falla.
+    Efectos internos: mueve hacia el sensor, retrocede, hace segundo
+    acercamiento lento, define posicion cero y state=IDLE.
+    Bloqueante: si.
+    Dependencias: _run_steps_blocking(), stop().
+    Errores: sin home_pin, eje ocupado, sensor no encontrado.
+
+10.40 stop()
+    Clase: AdvancedStepperAxisBase.
+    Proposito: detener movimiento y marcar posicion como no confiable.
+    Entradas: ninguna.
+    Salidas: True.
+    Efectos internos: desactiva PIO, deshabilita driver, limpia segmentos,
+    is_homed_flag=False y state=STOPPED.
+    Bloqueante: no.
+
+10.41 AdvancedBeltStepperAxis.__init__()
+    Clase: AdvancedBeltStepperAxis.
+    Proposito: validar parametros de banda y llamar al constructor base.
+    Entradas: pulley_teeth, belt_pitch_mm y parametros heredados.
+    Salidas: instancia o ValueError.
+
+10.42 AdvancedBeltStepperAxis.calculate_steps_per_mm()
+    Clase: AdvancedBeltStepperAxis.
+    Proposito: calcular steps/mm para transmision por banda.
+    Entradas: atributos motor_steps_per_rev, microsteps, pulley_teeth,
+    belt_pitch_mm.
+    Salidas: float.
+
+10.43 AdvancedBeltStepperAxis.get_status()
+    Clase: AdvancedBeltStepperAxis.
+    Proposito: extender get_status() con axis_type="BELT", pulley_teeth y
+    belt_pitch_mm.
+    Entradas: ninguna.
+    Salidas: dict.
+
+10.44 AdvancedScrewStepperAxis.__init__()
+    Clase: AdvancedScrewStepperAxis.
+    Proposito: validar screw_lead_mm y llamar al constructor base.
+    Entradas: screw_lead_mm y parametros heredados.
+    Salidas: instancia o ValueError.
+
+10.45 AdvancedScrewStepperAxis.calculate_steps_per_mm()
+    Clase: AdvancedScrewStepperAxis.
+    Proposito: calcular steps/mm para husillo.
+    Entradas: motor_steps_per_rev, microsteps, screw_lead_mm.
+    Salidas: float.
+
+10.46 AdvancedScrewStepperAxis.get_status()
+    Clase: AdvancedScrewStepperAxis.
+    Proposito: extender get_status() con axis_type="SCREW" y screw_lead_mm.
+    Entradas: ninguna.
+    Salidas: dict.
+
+
+======================================================================
+11. EXPLICACION DEL FLUJO INTERNO
+======================================================================
+
+11.1 Inicializacion
+
+    1) El usuario crea un objeto AdvancedBeltStepperAxis o
+       AdvancedScrewStepperAxis.
+    2) La clase hija guarda sus parametros mecanicos propios.
+    3) Se llama al constructor de AdvancedStepperAxisBase.
+    4) El constructor convierte tipos y normaliza valores.
+    5) _validate_constructor_values() verifica que velocidades, limites,
+       microsteps y parametros sean coherentes.
+    6) calculate_steps_per_mm() se ejecuta en la clase hija.
+    7) Se crean los objetos Pin para STEP, DIR, ENABLE y HOME.
+    8) Se inicializan posiciones, estado, error y variables de perfil.
+    9) El pin STEP se pone en bajo.
+   10) disable() deshabilita el driver inicialmente.
+   11) init_pio() crea la StateMachine PIO y la deja inactiva.
+
+11.2 Calculo de steps_per_mm
+
+    Para banda:
+        distancia_por_rev = pulley_teeth * belt_pitch_mm
+        steps_per_mm = motor_steps_per_rev * microsteps / distancia_por_rev
+
+    Para husillo:
+        steps_per_mm = motor_steps_per_rev * microsteps / screw_lead_mm
+
+    Este valor es critico porque todo movimiento en mm se convierte a pasos.
+
+11.3 HOME
+
+    Flujo de home():
+
+        1) Verifica que exista home_pin.
+        2) Verifica que el eje no este MOVING ni HOMING.
+        3) Limpia error y cambia state a HOMING.
+        4) Marca is_homed_flag=False.
+        5) Habilita el driver.
+        6) Calcula una distancia maxima de busqueda basada en el recorrido del
+           eje, backoff y margen adicional.
+        7) Ejecuta _run_steps_blocking() hacia home_direction con
+           stop_on_home=True.
+        8) Si no encuentra sensor, llama stop(), state=ERROR y retorna False.
+        9) Retrocede home_backoff_mm en direccion contraria.
+       10) Hace segundo acercamiento lento para mejorar repetibilidad.
+       11) Si falla el segundo acercamiento, llama stop(), state=ERROR y
+           retorna False.
+       12) Detiene PIO.
+       13) Define current_position_steps=0 y current_position_mm=0.0.
+       14) Define target_position_steps=0 y target_position_mm=0.0.
+       15) Marca is_homed_flag=True.
+       16) Cambia state=IDLE y retorna True.
+
+11.4 Movimiento absoluto
+
+    Flujo de start_move_to_mm(target_mm):
+
+        1) Verifica que el eje no este MOVING ni HOMING.
+        2) Verifica que is_homed_flag sea True.
+        3) Valida que target_mm este dentro de min_position_mm y max_position_mm.
+        4) Convierte target_mm a target_steps.
+        5) Calcula delta_steps respecto a current_position_steps.
+        6) Si delta_steps es cero, actualiza target/current y termina en IDLE.
+        7) Calcula distance_mm cuantizada desde delta_steps.
+        8) Selecciona perfil CONSTANT o TRAPEZOIDAL.
+        9) Crea lista de segmentos.
+       10) Guarda target, punto inicial, total de pasos y direccion.
+       11) Activa estado MOVING.
+       12) Habilita driver.
+       13) Escribe direccion.
+       14) Inicia primer segmento con _start_segment().
+       15) El metodo retorna inmediatamente.
+
+11.5 Movimiento relativo
+
+    start_move_relative_mm(distance_mm) simplemente calcula:
+
+        destino_absoluto = current_position_mm + distance_mm
+
+    Luego llama start_move_to_mm(destino_absoluto).
+
+11.6 Activacion del PIO
+
+    _start_segment(segment):
+
+        1) Lee steps y speed_mm_s del segmento.
+        2) Calcula frecuencia PIO con _speed_to_pio_freq().
+        3) Desactiva StateMachine.
+        4) Reinicializa StateMachine con step_pulse_pio().
+        5) Configura IRQ _on_pio_done().
+        6) Activa StateMachine.
+        7) Envia steps - 1 al FIFO.
+
+    El programa PIO produce los pulsos y al terminar dispara IRQ, lo que pone
+    _segment_done=True.
+
+11.7 Actualizacion de estado
+
+    update():
+
+        1) Si state no es MOVING, retorna False.
+        2) Si el segmento actual aun no termino, retorna True.
+        3) Si termino, suma _current_segment_steps a _completed_profile_steps.
+        4) Calcula el siguiente indice.
+        5) Si no hay mas segmentos, llama _finish_move() y retorna False.
+        6) Si hay mas segmentos, inicia el siguiente con _start_segment() y
+           retorna True.
+
+    Nota importante:
+        La posicion current_position_mm se consolida al final del movimiento.
+        El modulo no actualiza la posicion en tiempo real pulso por pulso.
+
+11.8 Stop
+
+    stop():
+
+        1) Desactiva PIO.
+        2) Deshabilita el driver.
+        3) Borra segmentos activos.
+        4) Marca movimiento y segmento como terminados.
+        5) Marca is_homed_flag=False.
+        6) Cambia state=STOPPED.
+        7) Retorna True.
+
+    Despues de stop(), la posicion ya no debe considerarse confiable. Lo
+    correcto es repetir home() antes de nuevos movimientos.
+
+11.9 Calculo de tiempo minimo
+
+    calculate_minimum_time_s(distance_mm):
+
+        - Usa la distancia absoluta.
+        - Calcula distancia necesaria para acelerar hasta vmax.
+        - Calcula distancia necesaria para desacelerar desde vmax.
+        - Si la distancia permite alcanzar vmax, el perfil es trapezoidal:
+
+              tiempo = tiempo_aceleracion + tiempo_crucero +
+                       tiempo_desaceleracion
+
+        - Si la distancia no permite alcanzar vmax, el perfil es triangular:
+
+              se calcula una velocidad pico menor que vmax
+
+11.10 Perfil trapezoidal y triangular segmentado
+
+    create_trapezoidal_profile():
+
+        1) Convierte distancia a pasos.
+        2) Convierte pasos de vuelta a distancia cuantizada.
+        3) Calcula tiempo minimo.
+        4) Si total_time_s es mayor al minimo, reduce la velocidad pico para
+           aproximar el tiempo solicitado.
+        5) Calcula tiempos de aceleracion, crucero y desaceleracion.
+        6) Divide el tiempo planificado en segmentos de duracion aproximada
+           profile_segment_time_s.
+        7) Para cada segmento calcula:
+              - tiempo inicial y final,
+              - velocidad aproximada en el tiempo medio,
+              - distancia acumulada al final del segmento,
+              - pasos que corresponden al segmento.
+        8) Agrega segmentos con _append_segment().
+        9) Corrige redondeos para que la suma final de steps coincida con el
+           total de pasos.
+
+11.11 Sincronizacion de tiempo comun
+
+    El modulo acepta total_time_s en movimientos y perfiles. Esto permite que
+    un controlador superior calcule un tiempo comun para varios ejes y le pida
+a cada eje que cubra su distancia en ese tiempo aproximado. El eje ajusta su
+velocidad pico/crucero para intentar cumplir ese tiempo, siempre respetando
+max_speed_mm_s, min_speed_mm_s, acceleration_mm_s2 y deceleration_mm_s2.
+
+
+======================================================================
+12. DIAGRAMA ASCII DE RELACION ENTRE CLASES
+======================================================================
+
+                    +-----------------------------+
+                    | AdvancedStepperAxisBase     |
+                    |-----------------------------|
+                    | - Logica comun de eje       |
+                    | - PIO STEP                  |
+                    | - HOME                      |
+                    | - Perfiles segmentados      |
+                    | - Estado y limites          |
+                    +--------------+--------------+
+                                   ^
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+    +-------------+----------------+   +------------+----------------+
+    | AdvancedBeltStepperAxis      |   | AdvancedScrewStepperAxis    |
+    |------------------------------|   |-----------------------------|
+    | Eje por banda y polea        |   | Eje por tornillo/husillo    |
+    | steps/mm por dientes*pitch   |   | steps/mm por lead del husillo|
+    +------------------------------+   +-----------------------------+
+
+Relacion con hardware:
+
+    +-----------------------------+
+    | Objeto de eje avanzado      |
+    +-------------+---------------+
+                  |
+                  +--> STEP -----> Driver externo -----> Motor a pasos
+                  +--> DIR  -----> Driver externo
+                  +--> ENABLE ---> Driver externo
+                  +<-- HOME  ----- Sensor / final de carrera
+                  |
+                  +--> PIO RP2040 genera pulsos STEP
+
+
+======================================================================
+13. DIAGRAMA ASCII DE LLAMADAS ENTRE FUNCIONES
+======================================================================
+
+13.1 Inicializacion
+
+    AdvancedBeltStepperAxis.__init__() / AdvancedScrewStepperAxis.__init__()
+    |
+    v
+    AdvancedStepperAxisBase.__init__()
+    |
+    +--> _validate_constructor_values()
+    +--> calculate_steps_per_mm()  [implementado por clase hija]
+    +--> disable()
+    +--> init_pio()
+         |
+         +--> _speed_to_pio_freq()
+         +--> step_pulse_pio() en StateMachine
+         +--> _on_pio_done() como IRQ
+
+13.2 Movimiento absoluto no bloqueante
+
+    start_move_to_mm(target_mm)
+    |
+    +--> validate_target(target_mm)
+    |    |
+    |    +--> _set_error() si esta fuera de limites
+    |
+    +--> _mm_to_steps(target_mm)
+    +--> _steps_to_mm(abs(delta_steps))
+    +--> create_constant_profile()  [si PROFILE_CONSTANT]
+    |
+    +--> create_trapezoidal_profile()  [si PROFILE_TRAPEZOIDAL]
+    |    |
+    |    +--> calculate_minimum_time_s()
+    |    +--> _profile_peak_speed_for_time()
+    |    +--> _speed_at_time()
+    |    +--> _distance_at_time()
+    |    +--> _append_segment()
+    |
+    +--> enable()
+    +--> _write_direction()
+    +--> _start_segment()
+         |
+         +--> _speed_to_pio_freq()
+         +--> step_pulse_pio() en PIO
+         +--> _on_pio_done() al terminar segmento
+
+13.3 Movimiento bloqueante
+
+    move_to_mm(target_mm)
+    |
+    +--> start_move_to_mm(target_mm)
+    +--> wait_until_done()
+         |
+         +--> is_busy()
+         +--> update()
+              |
+              +--> _start_segment() si hay siguiente segmento
+              +--> _finish_move() si termino todo el perfil
+
+13.4 Movimiento relativo
+
+    move_relative_mm(distance_mm)
+    |
+    +--> start_move_relative_mm(distance_mm)
+         |
+         +--> start_move_to_mm(current_position_mm + distance_mm)
+    |
+    +--> wait_until_done()
+
+13.5 HOME
+
+    home()
+    |
+    +--> _run_steps_blocking(busqueda, home_direction, stop_on_home=True)
+    |    |
+    |    +--> enable()
+    |    +--> _write_direction()
+    |    +--> _is_home_active()
+    |    +--> step_pulse_pio() en bloques cortos
+    |    +--> _mark_internal_move_done()
+    |
+    +--> _run_steps_blocking(backoff, -home_direction)
+    +--> _run_steps_blocking(segundo_acercamiento, home_direction,
+                             stop_on_home=True)
+    +--> stop() si falla
+    +--> establecer posicion cero si tiene exito
+
+
+======================================================================
+14. DIAGRAMA ASCII DEL FLUJO DE OPERACION
+======================================================================
+
+    Inicio
+      |
+      v
+    Crear eje concreto
+    AdvancedBeltStepperAxis o AdvancedScrewStepperAxis
+      |
+      v
+    Validar parametros mecanicos y electricos
+      |
+      v
+    Inicializar pines y PIO
+      |
+      v
+    Driver queda deshabilitado inicialmente
+      |
+      v
+    Ejecutar HOME
+      |
+      +-- falla --> STATE_ERROR --> revisar error --> corregir --> reintentar
+      |
+      v
+    STATE_IDLE con posicion 0.0 mm confiable
+      |
+      v
+    Solicitar movimiento absoluto o relativo
+      |
+      v
+    Validar HOME, limites y perfil
+      |
+      +-- falla --> STATE_ERROR --> leer get_status()["error"]
+      |
+      v
+    Crear perfil de segmentos
+      |
+      v
+    Habilitar driver y escribir DIR
+      |
+      v
+    Iniciar primer segmento en PIO
+      |
+      v
+    Llamar update() periodicamente
+      |
+      v
+    PIO termina segmento y activa IRQ
+      |
+      v
+    update() inicia siguiente segmento o finaliza
+      |
+      v
+    Movimiento terminado
+      |
+      v
+    STATE_IDLE, posicion actualizada al objetivo
+      |
+      v
+    Leer get_position() / get_status()
+      |
+      v
+    Fin o nuevo movimiento
+
+
+======================================================================
+15. EXPLICACION DE MOVIMIENTO ABSOLUTO Y RELATIVO
+======================================================================
+
+15.1 Movimiento absoluto
+
+Un movimiento absoluto usa coordenadas referidas al cero definido por HOME.
+El destino no se suma a la posicion actual, sino que representa una posicion
+final especifica dentro del recorrido.
+
+Ejemplo:
+
+    Posicion despues de HOME: 0 mm
+
+    move_to_mm(150)
+        El eje se mueve hasta la coordenada absoluta 150 mm.
+        Posicion final: 150 mm.
+
+    move_to_mm(70)
+        El eje no avanza 70 mm mas.
+        El eje regresa desde 150 mm hasta la coordenada absoluta 70 mm.
+        Posicion final: 70 mm.
+
+15.2 Movimiento relativo
+
+Un movimiento relativo suma o resta una distancia a la posicion actual.
+El parametro representa desplazamiento, no coordenada final absoluta.
+
+Ejemplo:
+
+    Posicion actual: 70 mm
+
+    move_relative_mm(30)
+        Destino calculado = 70 + 30 = 100 mm.
+        Posicion final: 100 mm.
+
+    move_relative_mm(-20)
+        Destino calculado = 100 - 20 = 80 mm.
+        Posicion final: 80 mm.
+
+15.3 Comparacion numerica
+
+    Suponga posicion actual = 120 mm.
+
+    move_to_mm(50)
+        Resultado: el eje termina en 50 mm.
+        Desplazamiento real: -70 mm.
+
+    move_relative_mm(50)
+        Resultado: el eje termina en 170 mm.
+        Desplazamiento real: +50 mm.
+
+15.4 Validacion de limites
+
+Tanto el movimiento absoluto como el relativo terminan usando validate_target()
+sobre un destino absoluto. Por lo tanto, si current_position_mm=200 y se llama
+move_relative_mm(50) con max_position_mm=220, el destino 250 mm es invalido y
+el movimiento no se inicia.
+
+
+======================================================================
+16. MANEJO DE ERRORES
+======================================================================
+
+16.1 Eje sin HOME
+
+    Causa:
+        start_move_to_mm() verifica is_homed_flag. Si es False, no permite
+        mover.
+
+    Como detectarlo:
+        get_status()["state"] == "ERROR"
+        get_status()["error"] == "El eje requiere home antes de mover"
+
+    Como corregirlo:
+        Ejecutar home() correctamente antes de mover.
+
+16.2 Objetivo fuera de limite
+
+    Causa:
+        target_mm menor que min_position_mm o mayor que max_position_mm.
+
+    Como detectarlo:
+        validate_target() retorna False y error contiene el rango permitido.
+
+    Como corregirlo:
+        Revisar limites configurados y coordenada objetivo.
+
+16.3 Eje ocupado
+
+    Causa:
+        Se intenta iniciar un movimiento mientras state es MOVING o HOMING.
+
+    Como detectarlo:
+        error = "El eje ya esta en movimiento".
+
+    Como corregirlo:
+        Esperar a que is_busy() sea False o llamar stop() si es emergencia.
+
+16.4 Falla de sensor HOME
+
+    Causa:
+        home_pin no configurado, sensor desconectado, logica home_active_low
+        incorrecta, direccion de busqueda equivocada o limite mecanico mal
+        ajustado.
+
+    Como detectarlo:
+        home() retorna False.
+        error puede ser:
+            - "No hay home_pin configurado"
+            - "No se encontro sensor HOME"
+            - "No se encontro HOME en segundo acercamiento"
+
+    Como corregirlo:
+        Verificar cableado, pull-up, home_active_low, home_direction y rango de
+        recorrido.
+
+16.5 Parametros invalidos
+
+    Causa:
+        Valores no fisicos en el constructor, por ejemplo microsteps <= 0,
+        max_speed_mm_s <= 0 o min_position_mm >= max_position_mm.
+
+    Como detectarlo:
+        Se lanza ValueError durante la construccion del objeto.
+
+    Como corregirlo:
+        Revisar parametros antes de crear el eje.
+
+16.6 Perfil invalido
+
+    Causa:
+        profile_mode distinto de "CONSTANT" o "TRAPEZOIDAL".
+
+    Como detectarlo:
+        start_move_to_mm() retorna False y error indica profile_mode invalido.
+
+    Como corregirlo:
+        Usar PROFILE_CONSTANT, PROFILE_TRAPEZOIDAL, "CONSTANT" o
+        "TRAPEZOIDAL".
+
+16.7 Movimiento detenido
+
+    Causa:
+        Se llama stop() durante o despues de una operacion.
+
+    Como detectarlo:
+        state == "STOPPED" y homed == False.
+
+    Como corregirlo:
+        Repetir home() antes de nuevos movimientos porque la posicion no es
+        confiable.
+
+16.8 Posicion no confiable despues de STOP
+
+    Causa:
+        Al detener PIO se desconoce cuantos pulsos reales fueron ejecutados
+        exactamente antes de la parada.
+
+    Como detectarlo:
+        is_homed() retorna False despues de stop().
+
+    Como corregirlo:
+        Ejecutar home() nuevamente.
+
+16.9 Perdida de pasos mecanica
+
+    Causa:
+        Aceleracion o velocidad demasiado alta, motor con poco torque,
+        corriente mal ajustada, atasco mecanico o tension de banda incorrecta.
+
+    Como detectarlo:
+        El modulo no tiene encoder; no puede detectarlo directamente. Se
+        observa como error de posicion fisica aunque get_position() indique el
+        destino.
+
+    Como corregirlo:
+        Reducir velocidad/aceleracion, ajustar corriente del driver, revisar
+        mecanica y repetir HOME.
+
+
+======================================================================
+17. RECOMENDACIONES DE USO
+======================================================================
+
+17.1 Orden recomendado de pruebas
+
+    1) Probar GPIO sin motor conectado si es posible.
+    2) Verificar que ENABLE activa y desactiva el driver correctamente.
+    3) Probar DIR con movimientos pequenos.
+    4) Probar STEP a baja velocidad.
+    5) Verificar sensor HOME con is_home_active().
+    6) Ejecutar home() con motor desacoplado o con recorrido seguro.
+    7) Ejecutar movimientos relativos pequenos.
+    8) Ejecutar movimientos absolutos dentro de limites.
+    9) Aumentar velocidad y aceleracion gradualmente.
+
+17.2 Velocidades iniciales recomendadas
+
+    Para X/Y por banda en maquina tipo Ender 3 V2:
+        max_speed_mm_s: 20 a 50 mm/s para primeras pruebas.
+        acceleration_mm_s2: 50 a 200 mm/s2.
+        home_speed_mm_s: 5 a 20 mm/s.
+
+    Para Z por husillo:
+        max_speed_mm_s: 1 a 5 mm/s inicialmente.
+        acceleration_mm_s2: 10 a 50 mm/s2.
+        home_speed_mm_s: 1 a 3 mm/s.
+
+17.3 Antes de conectar motores reales
+
+    - Confirmar pinout de Raspberry Pi Pico.
+    - Confirmar que las senales logicas sean compatibles con el driver.
+    - Confirmar fuente de alimentacion del motor.
+    - Ajustar corriente del driver.
+    - Verificar que STEP, DIR y ENABLE no esten cruzados.
+    - Confirmar que no se reutilice el mismo sm_id en dos ejes activos.
+    - Asegurar que el sistema mecanico pueda moverse sin trabas.
+
+17.4 Si el motor gira o se mueve al reves
+
+    Opcion de software:
+        Poner invert_direction=True.
+
+    Opcion de hardware:
+        Invertir una fase del motor, si se conoce correctamente el cableado.
+
+    Recomendacion:
+        Primero usar invert_direction=True porque es reversible y seguro.
+
+17.5 Si el sensor HOME trabaja invertido
+
+    Sintoma:
+        is_home_active() retorna True cuando el sensor no esta presionado, o
+        retorna False cuando si lo esta.
+
+    Correccion:
+        Cambiar home_active_low:
+            - True si el sensor activo lee 0.
+            - False si el sensor activo lee 1.
+
+17.6 Ajuste de microsteps y steps_per_mm
+
+    - El valor microsteps en el software debe coincidir con los jumpers o la
+      configuracion real del driver.
+    - Para banda, revisar pulley_teeth y belt_pitch_mm.
+    - Para husillo, revisar screw_lead_mm real, no solo el pitch de la rosca.
+    - Medir un desplazamiento real con regla o comparador y corregir parametros
+      si hay error sistematico.
+
+17.7 Uso de perfiles
+
+    - Usar PROFILE_TRAPEZOIDAL para movimientos normales porque reduce golpes
+      mecanicos al acelerar y desacelerar.
+    - Usar PROFILE_CONSTANT solo para pruebas simples o movimientos lentos.
+    - Reducir profile_segment_time_s para mayor suavidad, considerando que se
+      crean mas segmentos.
+
+17.8 Uso con controlador multi-eje
+
+    - Cada eje debe tener sm_id unico.
+    - El controlador superior debe llamar update() de todos los ejes en un
+      bucle rapido.
+    - Para sincronizacion, calcular un total_time_s comun y pasarlo a cada eje.
+
+
+======================================================================
+18. LIMITACIONES DEL MODULO
+======================================================================
+
+    - Controla un solo eje; no coordina por si solo X/Y/Z simultaneamente.
+    - No implementa interpolacion lineal multi-eje tipo G-code.
+    - No implementa jerk, S-curve ni limitacion avanzada de vibraciones.
+    - No tiene encoder ni control closed-loop.
+    - No detecta perdida de pasos.
+    - No corrige posicion si el motor se salta pasos.
+    - Requiere drivers externos STEP/DIR/ENABLE.
+    - Requiere HOME exitoso para posicion confiable.
+    - Despues de stop(), la posicion se marca como no confiable.
+    - Durante movimiento no actualiza current_position_mm continuamente; la
+      posicion logica se consolida al finalizar todo el perfil.
+    - La rutina de HOME es bloqueante.
+    - Los movimientos bloqueantes dependen de wait_until_done(), que duerme
+      1 ms por iteracion.
+    - La precision temporal del perfil depende de PIO para los pulsos, pero la
+      transicion entre segmentos depende de update() y de la atencion de
+      MicroPython.
+    - No incluye proteccion fisica ante choque si los limites estan mal
+      configurados o el HOME falla mecanicamente.
+
+
+======================================================================
+19. EJEMPLO CONCEPTUAL DE USO
+======================================================================
+
+Ejemplo resumido para un eje X por banda GT2, similar a Ender 3 V2:
+
+    from objAdvanceStepperAxis import AdvancedBeltStepperAxis
+    from objAdvanceStepperAxis import PROFILE_TRAPEZOIDAL
+
+    x_axis = AdvancedBeltStepperAxis(
+        name="X",
+        step_pin=2,
+        dir_pin=3,
+        enable_pin=4,
+        sm_id=0,
+        motor_steps_per_rev=200,
+        microsteps=16,
+        pulley_teeth=20,
+        belt_pitch_mm=2.0,
+        max_speed_mm_s=50.0,
+        acceleration_mm_s2=150.0,
+        deceleration_mm_s2=150.0,
+        min_position_mm=0.0,
+        max_position_mm=220.0,
+        home_pin=5,
+        home_direction=-1,
+        home_speed_mm_s=10.0,
+        home_backoff_mm=2.0,
+        invert_direction=False,
+        home_active_low=True
+    )
+
+    if x_axis.home():
+        x_axis.move_to_mm(100.0, PROFILE_TRAPEZOIDAL)
+        x_axis.move_relative_mm(-20.0, PROFILE_TRAPEZOIDAL)
+        estado = x_axis.get_status()
+        print(estado)
+    else:
+        print("Error de HOME:", x_axis.get_status()["error"])
+
+Ejemplo no bloqueante:
+
+    x_axis.start_move_to_mm(150.0, PROFILE_TRAPEZOIDAL)
+    while x_axis.is_busy():
+        x_axis.update()
+        # aqui un controlador superior podria actualizar otros ejes
+
+
+======================================================================
+20. CONCLUSION
+======================================================================
+
+objAdvanceStepperAxis.py es un modulo central para el control avanzado de un
+eje lineal individual en un sistema cartesiano X/Y/Z con Raspberry Pi Pico /
+RP2040 y MicroPython. Su responsabilidad es convertir ordenes en milimetros a
+pulsos STEP precisos, generar esos pulsos mediante PIO, controlar direccion y
+habilitacion del driver, ejecutar HOME, validar limites y crear perfiles de
+movimiento constantes o trapezoidales/triangulares segmentados.
+
+Dentro del sistema completo, este archivo actua como capa de eje fisico. Los
+modulos superiores pueden crear un eje X, un eje Y y un eje Z usando las clases
+concretas AdvancedBeltStepperAxis o AdvancedScrewStepperAxis, y luego coordinar
+sus movimientos mediante llamadas no bloqueantes y update().
+
+La separacion entre eje por banda y eje por husillo permite mantener una logica
+comun de movimiento y cambiar solamente la formula mecanica de steps_per_mm.
+Esto facilita adaptar el proyecto a maquinas tipo Ender 3 V2, CNC pequenas,
+plataformas cartesianas o mecanismos personalizados.
+
+
+======================================================================
+OBSERVACIONES Y MEJORAS RECOMENDADAS
+======================================================================
+
+1) Actualizacion de posicion durante movimiento
+    Actualmente la posicion current_position_mm se actualiza al finalizar todo
+    el perfil. Para diagnostico en tiempo real podria agregarse una posicion
+    estimada basada en _completed_profile_steps y _current_segment_steps.
+
+2) Rutina de HOME bloqueante
+    home() bloquea hasta terminar. Para sistemas multi-eje o interfaces
+    reactivas podria implementarse una rutina de HOME no bloqueante por estados.
+
+3) Manejo de limites durante HOME
+    La busqueda de HOME usa una distancia maxima basada en recorrido mas margen.
+    Seria util exponer un parametro especifico de max_home_travel_mm.
+
+4) Validacion de sm_id
+    El codigo convierte sm_id a int, pero no valida explicitamente rango 0..7.
+    Aunque rp2.StateMachine puede fallar si es invalido, una validacion temprana
+    daria mensajes mas claros.
+
+5) Compatibilidad de home_pin con pull-down
+    El codigo crea home_pin con Pin.PULL_UP. Si se usan sensores que requieren
+    pull-down externo o interno, podria agregarse una opcion configurable.
+
+6) Perfil con total_time_s y velocidad minima
+    Si total_time_s es muy grande, _profile_peak_speed_for_time() limita la
+    velocidad minima a min_speed_mm_s. Por eso el tiempo real planificado puede
+    no alcanzar tiempos muy largos. Conviene documentarlo en el controlador
+    multi-eje si se usa sincronizacion temporal.
+
+7) Parada de emergencia y posicion parcial
+    stop() desactiva PIO y marca HOME como invalido, lo cual es seguro. Como
+    mejora, podria registrarse una estimacion de pasos completados antes del
+    stop para diagnostico, sin marcarla como posicion confiable.
+
+8) Doble linea en blanco antes de _distance_at_time()
+    Hay una separacion visual mayor de lo habitual antes del metodo
+    _distance_at_time(). No afecta la ejecucion, pero podria ajustarse por
+    estilo.
+
+9) Pruebas unitarias con mocks
+    Dado que machine.Pin y rp2 solo existen en MicroPython/RP2040, se podrian
+    crear mocks para probar calculos de perfiles, conversiones y validaciones
+    en CPython.
+
+10) Documentar limites mecanicos reales
+    El modulo valida limites logicos, pero el usuario debe medir y configurar
+    correctamente min_position_mm y max_position_mm para evitar choques fisicos.
