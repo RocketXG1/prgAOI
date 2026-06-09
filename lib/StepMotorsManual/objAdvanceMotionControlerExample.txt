@@ -1,0 +1,994 @@
+1. TÍTULO
+
+objAdvanceMotionControler.py - Archivo de ejemplos de instanciación y uso
+
+Este documento contiene ejemplos prácticos para instanciar y usar el controlador avanzado de movimiento definido en objAdvanceMotionControler.py.
+
+
+2. INTRODUCCIÓN
+
+Este archivo explica, con ejemplos prácticos, cómo crear y usar los objetos, clases y métodos principales del módulo objAdvanceMotionControler.py.
+
+El módulo analizado contiene un controlador de movimiento avanzado llamado AdvancedMotionController. Este controlador no genera pulsos STEP directamente, no configura pines de la Raspberry Pi Pico y no crea máquinas de estado PIO. Su función es coordinar ejes ya existentes para que varios motores a pasos puedan moverse de forma sincronizada y llegar aproximadamente al mismo tiempo a sus objetivos.
+
+Los ejemplos sirven para aprender a usar la clase AdvancedMotionController junto con ejes avanzados del proyecto, por ejemplo AdvancedBeltStepperAxis y AdvancedScrewStepperAxis del archivo objAdvanceStepperAxis.py.
+
+Todos los valores de pines, velocidades, aceleraciones, límites, pasos por revolución, microsteps, poleas, banda, tornillo y sensores HOME deben ajustarse al hardware real antes de probar en una máquina física.
+
+Los ejemplos están orientados a Raspberry Pi Pico / RP2040 con MicroPython y a un sistema XYZ con motores a pasos, drivers externos STEP/DIR/ENABLE y sensores HOME.
+
+
+3. REQUISITOS PREVIOS
+
+Módulos que deben existir en la Raspberry Pi Pico o en el proyecto:
+
+- objAdvanceMotionControler.py
+  Contiene AdvancedMotionController, STATE_IDLE, STATE_MOVING, STATE_HOMING, STATE_ERROR, STATE_STOPPED, PROFILE_CONSTANT y PROFILE_TRAPEZOIDAL.
+
+- objAdvanceStepperAxis.py
+  Debe existir si se usarán los ejemplos completos con ejes reales. Este archivo debe aportar clases de eje compatibles, por ejemplo AdvancedBeltStepperAxis y AdvancedScrewStepperAxis.
+
+- machine
+  Módulo propio de MicroPython usado por los ejes para controlar pines.
+
+- rp2
+  Módulo propio de MicroPython para usar PIO en Raspberry Pi Pico / RP2040.
+
+- time
+  Usado por el controlador y por los ejes para pausas y actualización de movimiento.
+
+Requisitos de hardware:
+
+- Se requiere una Raspberry Pi Pico o una placa compatible con RP2040 si se usarán los ejes reales con PIO.
+- Se requieren drivers externos para motor a pasos con entradas STEP, DIR y, si aplica, ENABLE.
+- Se requieren motores a pasos conectados a los drivers externos, nunca conectados directamente a la Pico.
+- Se recomiendan sensores HOME para cada eje usado en operación real.
+- El archivo objAdvanceMotionControler.py debe haberse cargado previamente en la Pico.
+- Para ejecutar los ejemplos que instancian ejes, también debe haberse cargado objAdvanceStepperAxis.py.
+- Este controlador depende de que cada eje implemente la API esperada: get_position(), is_homed(), is_busy(), validate_target(), calculate_minimum_time_s(), start_move_to_mm(), update(), stop(), home(), enable(), disable() y get_status().
+
+
+4. CLASES DISPONIBLES EN EL ARCHIVO
+
+Clase encontrada en objAdvanceMotionControler.py:
+
+- AdvancedMotionController
+
+  Propósito:
+  Coordinar movimientos sincronizados entre varios ejes avanzados ya creados. El controlador recibe objetivos absolutos o relativos para uno o más ejes, valida que los ejes existan, que tengan HOME, que los objetivos estén dentro de límites y calcula un plan común para que los ejes lleguen aproximadamente al mismo tiempo.
+
+  Cuándo conviene usarla:
+  Conviene usarla cuando se tiene una máquina con varios ejes, por ejemplo X, Y y Z, y se desea moverlos de forma coordinada. También conviene cuando se necesita ejecutar HOME secuencial en varios ejes, detener todos los ejes, consultar posiciones globales o consultar el estado completo del sistema.
+
+  Parámetros principales del constructor:
+  - axes: diccionario opcional de ejes ya instanciados. Ejemplo: {"X": eje_x, "Y": eje_y, "Z": eje_z}. Si no se entrega, el controlador se crea vacío y luego se agregan ejes con add_axis().
+
+  Métodos principales que se usarán en los ejemplos:
+  - add_axis(axis_name, axis_object): agrega o reemplaza un eje en el controlador.
+  - get_axis(axis_name): obtiene un eje registrado por nombre.
+  - create_synchronized_profile_plan(targets, profile_mode): calcula un plan sincronizado sin iniciar necesariamente el movimiento.
+  - move_to(targets, profile_mode, wait): ejecuta movimiento absoluto sincronizado.
+  - move_relative(distances, profile_mode, wait): convierte desplazamientos relativos en destinos absolutos y ejecuta movimiento sincronizado.
+  - wait_until_done(): espera y actualiza los ejes hasta que el movimiento termine.
+  - home_all(sequence): ejecuta HOME secuencial en todos los ejes o en el orden indicado.
+  - stop_all(): detiene todos los ejes registrados.
+  - enable_all(): habilita todos los drivers llamando enable() en cada eje.
+  - disable_all(): deshabilita todos los drivers llamando disable() en cada eje.
+  - get_position(): devuelve posiciones actuales de todos los ejes.
+  - all_homed(): devuelve True si todos los ejes tienen HOME válido.
+  - is_busy(): indica si el controlador o algún eje está ocupado.
+  - get_last_plan(): devuelve el último plan sincronizado calculado.
+  - get_status(): devuelve estado completo del controlador y de los ejes.
+
+Constantes públicas disponibles en el archivo:
+
+- STATE_IDLE: controlador libre.
+- STATE_MOVING: controlador ejecutando movimiento.
+- STATE_HOMING: controlador ejecutando HOME.
+- STATE_ERROR: controlador en error.
+- STATE_STOPPED: controlador detenido por paro.
+- PROFILE_CONSTANT: perfil de velocidad constante.
+- PROFILE_TRAPEZOIDAL: perfil trapezoidal o triangular.
+
+Nota importante:
+objAdvanceMotionControler.py no contiene clases de eje. Por eso los ejemplos que crean X, Y y Z usan clases externas representativas del proyecto, como AdvancedBeltStepperAxis y AdvancedScrewStepperAxis, que deben existir en objAdvanceStepperAxis.py.
+
+
+5. VARIABLES Y PARÁMETROS USADOS EN LOS EJEMPLOS
+
+Parámetros propios de AdvancedMotionController:
+
+- axes
+  Descripción: diccionario opcional con ejes ya instanciados.
+  Ejemplo típico: {"X": eje_x, "Y": eje_y, "Z": eje_z}
+  Aplica al archivo analizado: sí.
+
+- axis_name
+  Descripción: nombre lógico del eje dentro del controlador. El controlador lo convierte a mayúsculas.
+  Ejemplo típico: "X", "Y", "Z"
+  Aplica al archivo analizado: sí.
+
+- axis_object
+  Descripción: objeto de eje compatible con la API esperada por AdvancedMotionController.
+  Ejemplo típico: eje_x creado con AdvancedBeltStepperAxis.
+  Aplica al archivo analizado: sí.
+
+- targets
+  Descripción: diccionario de posiciones absolutas en milímetros para mover uno o varios ejes.
+  Ejemplo típico: {"X": 150.0, "Y": 70.0, "Z": 10.0}
+  Aplica al archivo analizado: sí.
+
+- distances
+  Descripción: diccionario de desplazamientos relativos en milímetros.
+  Ejemplo típico: {"X": 20.0, "Y": -5.0, "Z": 2.0}
+  Aplica al archivo analizado: sí.
+
+- profile_mode
+  Descripción: modo de perfil solicitado al eje.
+  Ejemplo típico: PROFILE_TRAPEZOIDAL o PROFILE_CONSTANT.
+  Aplica al archivo analizado: sí.
+
+- wait
+  Descripción: si es True, move_to() o move_relative() esperan hasta terminar; si es False, arrancan el movimiento y el programa debe llamar wait_until_done() o update() mediante el controlador.
+  Ejemplo típico: wait=True para pruebas simples; wait=False para ciclos principales no bloqueantes.
+  Aplica al archivo analizado: sí.
+
+- sequence
+  Descripción: orden opcional para ejecutar HOME en home_all().
+  Ejemplo típico: ["Z", "X", "Y"]
+  Aplica al archivo analizado: sí.
+
+Parámetros de ejes externos usados en los ejemplos porque el controlador necesita ejes ya creados:
+
+- name
+  Descripción: nombre interno del eje.
+  Ejemplo típico: "X", "Y", "Z"
+  Aplica al archivo analizado: indirectamente, porque pertenece al eje externo.
+
+- step_pin
+  Descripción: pin GPIO conectado a STEP del driver.
+  Ejemplo típico: 2 para X, 6 para Y, 10 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- dir_pin
+  Descripción: pin GPIO conectado a DIR del driver.
+  Ejemplo típico: 3 para X, 7 para Y, 11 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- enable_pin
+  Descripción: pin GPIO conectado a ENABLE del driver.
+  Ejemplo típico: 4 para X, 8 para Y, 12 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- sm_id
+  Descripción: identificador de StateMachine PIO usado por el eje.
+  Ejemplo típico: 0 para X, 1 para Y, 2 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- motor_steps_per_rev
+  Descripción: pasos completos por vuelta del motor.
+  Ejemplo típico: 200 para motor de 1.8 grados.
+  Aplica al archivo analizado: indirectamente.
+
+- microsteps
+  Descripción: configuración de micropasos del driver.
+  Ejemplo típico: 8, 16 o 32 según DIP switches o configuración del driver.
+  Aplica al archivo analizado: indirectamente.
+
+- max_speed_mm_s
+  Descripción: velocidad máxima permitida por el eje.
+  Ejemplo típico: 80.0 para X/Y, 20.0 para Z.
+  Aplica al archivo analizado: indirectamente; el controlador la consulta en perfil constante.
+
+- acceleration_mm_s2
+  Descripción: aceleración del perfil de movimiento.
+  Ejemplo típico: 200.0 para X/Y, 80.0 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- deceleration_mm_s2
+  Descripción: desaceleración del perfil de movimiento.
+  Ejemplo típico: 200.0 para X/Y, 80.0 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- pulley_teeth
+  Descripción: dientes de la polea en ejes por banda.
+  Ejemplo típico: 20.
+  Aplica al archivo analizado: indirectamente.
+
+- belt_pitch_mm
+  Descripción: paso de la banda en milímetros por diente.
+  Ejemplo típico: 2.0 para GT2.
+  Aplica al archivo analizado: indirectamente.
+
+- screw_lead_mm
+  Descripción: avance lineal por vuelta del tornillo o husillo.
+  Ejemplo típico: 8.0 mm/vuelta.
+  Aplica al archivo analizado: indirectamente.
+
+- home_pin
+  Descripción: pin GPIO conectado al sensor HOME del eje.
+  Ejemplo típico: 5 para X, 9 para Y, 13 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- home_direction
+  Descripción: dirección de búsqueda de HOME. Normalmente -1 hacia el origen o 1 hacia el extremo positivo.
+  Ejemplo típico: -1.
+  Aplica al archivo analizado: indirectamente.
+
+- home_speed_mm_s
+  Descripción: velocidad para buscar HOME.
+  Ejemplo típico: 5.0.
+  Aplica al archivo analizado: indirectamente.
+
+- home_backoff_mm
+  Descripción: distancia para retirarse del sensor luego de activarlo.
+  Ejemplo típico: 2.0 o 3.0.
+  Aplica al archivo analizado: indirectamente.
+
+- min_position_mm
+  Descripción: límite mínimo permitido del eje.
+  Ejemplo típico: 0.0.
+  Aplica al archivo analizado: indirectamente; el controlador llama validate_target() del eje.
+
+- max_position_mm
+  Descripción: límite máximo permitido del eje.
+  Ejemplo típico: 300.0 para X/Y, 80.0 para Z.
+  Aplica al archivo analizado: indirectamente; el controlador llama validate_target() del eje.
+
+- invert_direction
+  Descripción: invierte la lógica del pin DIR si el eje se mueve al lado contrario.
+  Ejemplo típico: False al inicio, True si la dirección física queda invertida.
+  Aplica al archivo analizado: indirectamente.
+
+- enable_active_low
+  Descripción: define si ENABLE se activa con nivel bajo.
+  Ejemplo típico: True en muchos drivers.
+  Aplica al archivo analizado: indirectamente.
+
+- home_active_low
+  Descripción: define si el sensor HOME se considera activo en nivel bajo.
+  Ejemplo típico: True con finales de carrera a GND y pull-up.
+  Aplica al archivo analizado: indirectamente.
+
+
+6. CONSIDERACIONES DE HARDWARE
+
+- Los pines usados en estos ejemplos son ejemplos. Deben cambiarse según el cableado real.
+- Cada eje debe usar un sm_id diferente si usa PIO. No se debe repetir sm_id entre X, Y y Z.
+- Los drivers de motor deben compartir GND con la Raspberry Pi Pico.
+- La Raspberry Pi Pico no alimenta los motores. La alimentación de potencia debe venir de una fuente externa adecuada para los motores y drivers.
+- Los motores deben estar conectados a drivers externos STEP/DIR/ENABLE. Nunca conecte un motor a pasos directamente a los pines GPIO de la Pico.
+- Los sensores HOME deben probarse antes de mover motores. Verifique con una lectura simple que el sensor cambia de estado correctamente.
+- Durante pruebas sin sensor HOME, se puede simular is_homed_flag=True solamente para pruebas controladas, con motores sin carga, recorridos cortos y bajo supervisión. No debe usarse esta simulación para operación real.
+- Antes de ejecutar movimientos largos, pruebe movimientos cortos y velocidades bajas.
+- Si el eje se mueve en dirección contraria, primero detenga el sistema y revise invert_direction o el cableado del motor/driver.
+- Si un sensor HOME trabaja invertido, ajuste home_active_low en el eje externo.
+
+
+7. EJEMPLO 1 - INSTANCIACIÓN MÍNIMA O BÁSICA
+
+Objetivo:
+Crear un controlador con un solo eje X ya instanciado y realizar un movimiento absoluto sencillo.
+
+Como objAdvanceMotionControler.py es un controlador y no contiene clases de eje, este ejemplo crea primero un eje X usando AdvancedBeltStepperAxis del módulo externo objAdvanceStepperAxis.py.
+
+Código completo:
+
+INICIO CODIGO EJEMPLO 1
+from objAdvanceMotionControler import AdvancedMotionController, PROFILE_TRAPEZOIDAL
+from objAdvanceStepperAxis import AdvancedBeltStepperAxis
+
+# Crear eje X por banda/polea.
+# Cambiar step_pin, dir_pin, enable_pin y sm_id según el hardware real.
+eje_x = AdvancedBeltStepperAxis(
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=50.0,
+    acceleration_mm_s2=100.0,
+    deceleration_mm_s2=100.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+)
+
+# Crear el controlador vacío.
+controlador = AdvancedMotionController()
+
+# Registrar el eje X dentro del controlador.
+controlador.add_axis("X", eje_x)
+
+# Habilitar todos los drivers registrados.
+controlador.enable_all()
+
+# SOLO PARA PRUEBA CONTROLADA SIN SENSOR HOME:
+# Esto permite probar un movimiento corto sin ejecutar home().
+# No usar en operación real.
+eje_x.is_homed_flag = True
+
+# Mover X a la posición absoluta 20.0 mm.
+# No significa avanzar 20 mm desde donde esté, sino ir a la coordenada X=20.0.
+ok = controlador.move_to({"X": 20.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+
+# Consultar estado y posición.
+print("Movimiento OK:", ok)
+print("Posiciones:", controlador.get_position())
+print("Estado:", controlador.get_status())
+
+# Deshabilitar drivers al terminar la prueba si es seguro hacerlo.
+controlador.disable_all()
+FIN CODIGO EJEMPLO 1
+
+Explicación línea por línea:
+
+- Se importa AdvancedMotionController desde objAdvanceMotionControler.py.
+- Se importa PROFILE_TRAPEZOIDAL para solicitar perfil trapezoidal.
+- Se importa AdvancedBeltStepperAxis desde objAdvanceStepperAxis.py porque el controlador necesita ejes ya creados.
+- Se crea eje_x con pines STEP, DIR y ENABLE de ejemplo.
+- sm_id=0 indica que el eje X usa la StateMachine PIO 0.
+- motor_steps_per_rev=200 corresponde a un motor típico de 1.8 grados.
+- microsteps=16 debe coincidir con la configuración real del driver.
+- max_speed_mm_s, acceleration_mm_s2 y deceleration_mm_s2 son valores conservadores de prueba.
+- pulley_teeth y belt_pitch_mm definen la mecánica del eje por banda.
+- Se crea controlador vacío con AdvancedMotionController().
+- add_axis("X", eje_x) registra el eje con nombre X.
+- enable_all() llama enable() en todos los ejes registrados.
+- eje_x.is_homed_flag=True solo se usa para una prueba controlada sin HOME real. No se recomienda en operación real.
+- move_to({"X": 20.0}) mueve a una posición absoluta de 20 mm.
+- get_position() devuelve la posición actual de todos los ejes registrados.
+- get_status() devuelve estado del controlador, estado de HOME, posiciones, último plan y estado de ejes.
+- disable_all() deshabilita los drivers al terminar.
+
+Valores que deben cambiarse según el hardware:
+
+- step_pin
+- dir_pin
+- enable_pin
+- sm_id
+- microsteps
+- max_speed_mm_s
+- acceleration_mm_s2
+- deceleration_mm_s2
+- pulley_teeth
+- belt_pitch_mm
+
+
+8. EJEMPLO 2 - INSTANCIACIÓN CON PARÁMETROS DE HOME
+
+Objetivo:
+Crear un eje X con sensor HOME y usar home_all() desde el controlador antes de mover.
+
+Comportamiento:
+El controlador ejecuta HOME de forma secuencial. En este ejemplo solo existe X, por lo que llama eje_x.home(). Luego, si el HOME fue correcto, permite ejecutar movimientos absolutos.
+
+Si el sensor trabaja invertido:
+Cambie home_active_low. Si el sensor se activa conectando la entrada a GND con pull-up, normalmente home_active_low=True. Si el sensor entrega nivel alto cuando está activo, use home_active_low=False.
+
+Código completo:
+
+INICIO CODIGO EJEMPLO 2
+from objAdvanceMotionControler import AdvancedMotionController, PROFILE_TRAPEZOIDAL
+from objAdvanceStepperAxis import AdvancedBeltStepperAxis
+
+# Crear eje X con sensor HOME.
+eje_x = AdvancedBeltStepperAxis(
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=40.0,
+    acceleration_mm_s2=80.0,
+    deceleration_mm_s2=80.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=3.0,
+    home_active_low=True,
+)
+
+# Crear controlador con el eje X ya registrado desde el constructor.
+controlador = AdvancedMotionController({"X": eje_x})
+
+# Habilitar driver.
+controlador.enable_all()
+
+# Ejecutar HOME en todos los ejes registrados.
+if controlador.home_all(sequence=["X"]):
+    print("HOME correcto")
+
+    # Después de HOME, mover a 30 mm absolutos.
+    controlador.move_to({"X": 30.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    print("Posición final:", controlador.get_position())
+else:
+    print("Error en HOME:", controlador.get_status())
+    controlador.stop_all()
+FIN CODIGO EJEMPLO 2
+
+Explicación:
+
+- home_pin=5 indica el GPIO conectado al sensor HOME de X.
+- home_direction=-1 indica que el eje busca HOME moviéndose hacia la dirección negativa.
+- home_speed_mm_s=5.0 usa una velocidad baja para buscar el sensor.
+- home_backoff_mm=3.0 retira el eje 3 mm después de detectar HOME.
+- home_active_low=True indica que el sensor se considera activo cuando la entrada está en bajo.
+- AdvancedMotionController({"X": eje_x}) crea el controlador y registra X de inmediato.
+- home_all(sequence=["X"]) ejecuta HOME en X.
+- Si home_all() devuelve True, el eje queda referenciado y se puede mover.
+- Si home_all() devuelve False, se consulta get_status() y se ejecuta stop_all().
+
+
+9. EJEMPLO 3 - INSTANCIACIÓN CON LÍMITES Y DIRECCIÓN INVERTIDA
+
+Objetivo:
+Crear un eje X con límites mínimos y máximos, y mostrar el uso de invert_direction.
+
+Cuándo usar invert_direction:
+Use invert_direction=True cuando el eje se mueve físicamente en sentido contrario al esperado. Por ejemplo, si pedir X=50 mm hace que el carro se aleje hacia el lado negativo, se puede invertir la lógica del pin DIR desde software.
+
+Qué ocurre si se pide un objetivo fuera de rango:
+El controlador llama validate_target() del eje antes de iniciar el movimiento. Si el objetivo está por debajo de min_position_mm o por encima de max_position_mm, move_to() devuelve False, el controlador pasa a estado ERROR y get_status() muestra el error.
+
+Código completo:
+
+INICIO CODIGO EJEMPLO 3
+from objAdvanceMotionControler import AdvancedMotionController, PROFILE_TRAPEZOIDAL
+from objAdvanceStepperAxis import AdvancedBeltStepperAxis
+
+# Crear eje X con límites de recorrido e inversión de dirección.
+eje_x = AdvancedBeltStepperAxis(
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=60.0,
+    acceleration_mm_s2=120.0,
+    deceleration_mm_s2=120.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+    invert_direction=True,
+    enable_active_low=True,
+    home_active_low=True,
+)
+
+controlador = AdvancedMotionController({"X": eje_x})
+controlador.enable_all()
+
+if not controlador.home_all(["X"]):
+    print("No se pudo hacer HOME:", controlador.get_status())
+    controlador.stop_all()
+else:
+    # Movimiento válido dentro del rango 0 a 300 mm.
+    ok_1 = controlador.move_to({"X": 100.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    print("Movimiento a 100 mm:", ok_1)
+
+    # Movimiento inválido: 350 mm está fuera del máximo de 300 mm.
+    ok_2 = controlador.move_to({"X": 350.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    print("Movimiento a 350 mm:", ok_2)
+    print("Estado después del intento fuera de rango:", controlador.get_status())
+FIN CODIGO EJEMPLO 3
+
+Explicación:
+
+- min_position_mm=0.0 define el mínimo permitido.
+- max_position_mm=300.0 define el máximo permitido.
+- invert_direction=True invierte la lógica de dirección del eje externo.
+- El movimiento a X=100.0 debe ser válido si el eje hizo HOME correctamente.
+- El movimiento a X=350.0 debe fallar porque supera max_position_mm.
+- El controlador no debería iniciar el movimiento inválido porque primero valida límites.
+
+
+10. EJEMPLO 4 - USO CON VARIOS EJES
+
+Objetivo:
+Crear un sistema XYZ con dos ejes por banda/polea y un eje por tornillo/husillo, registrarlos en AdvancedMotionController y realizar movimientos absolutos sincronizados.
+
+Configuración propuesta:
+
+- X: eje por banda/polea.
+- Y: eje por banda/polea.
+- Z: eje por tornillo/husillo.
+
+Nota sobre movimiento absoluto:
+Si se llama move_to({"X": 150.0}) y luego move_to({"X": 70.0}), el segundo comando va a la posición absoluta X=70.0. No suma 70 mm al valor anterior.
+
+Código completo:
+
+INICIO CODIGO EJEMPLO 4
+from objAdvanceMotionControler import AdvancedMotionController, PROFILE_TRAPEZOIDAL
+from objAdvanceStepperAxis import AdvancedBeltStepperAxis, AdvancedScrewStepperAxis
+
+# Eje X por banda GT2.
+eje_x = AdvancedBeltStepperAxis(
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=80.0,
+    acceleration_mm_s2=200.0,
+    deceleration_mm_s2=200.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=8.0,
+    home_backoff_mm=3.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+)
+
+# Eje Y por banda GT2.
+eje_y = AdvancedBeltStepperAxis(
+    name="Y",
+    step_pin=6,
+    dir_pin=7,
+    enable_pin=8,
+    sm_id=1,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=80.0,
+    acceleration_mm_s2=200.0,
+    deceleration_mm_s2=200.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=9,
+    home_direction=-1,
+    home_speed_mm_s=8.0,
+    home_backoff_mm=3.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+)
+
+# Eje Z por tornillo/husillo.
+eje_z = AdvancedScrewStepperAxis(
+    name="Z",
+    step_pin=10,
+    dir_pin=11,
+    enable_pin=12,
+    sm_id=2,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=20.0,
+    acceleration_mm_s2=80.0,
+    deceleration_mm_s2=80.0,
+    screw_lead_mm=8.0,
+    home_pin=13,
+    home_direction=-1,
+    home_speed_mm_s=3.0,
+    home_backoff_mm=2.0,
+    min_position_mm=0.0,
+    max_position_mm=80.0,
+)
+
+# Crear controlador con X, Y y Z.
+controlador = AdvancedMotionController({
+    "X": eje_x,
+    "Y": eje_y,
+    "Z": eje_z,
+})
+
+controlador.enable_all()
+
+# HOME secuencial. En muchas máquinas conviene subir o referenciar Z primero.
+if controlador.home_all(sequence=["Z", "X", "Y"]):
+    print("Todos los ejes tienen HOME:", controlador.all_homed())
+
+    # Movimiento absoluto sincronizado a X=150, Y=70, Z=10.
+    controlador.move_to({"X": 150.0, "Y": 70.0, "Z": 10.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    print("Después del primer movimiento:", controlador.get_position())
+
+    # Movimiento absoluto a X=70, Y=70, Z=5.
+    # X va a 70 absoluto; no suma 70 a 150.
+    controlador.move_to({"X": 70.0, "Y": 70.0, "Z": 5.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    print("Después del segundo movimiento:", controlador.get_position())
+else:
+    print("Fallo HOME:", controlador.get_status())
+    controlador.stop_all()
+FIN CODIGO EJEMPLO 4
+
+Explicación:
+
+- Se crean tres ejes externos compatibles con AdvancedMotionController.
+- X e Y usan AdvancedBeltStepperAxis porque son ejes por banda.
+- Z usa AdvancedScrewStepperAxis porque es un eje por tornillo/husillo.
+- Cada eje usa pines diferentes.
+- Cada eje usa sm_id diferente: X=0, Y=1, Z=2.
+- El controlador recibe los tres ejes mediante un diccionario.
+- home_all(sequence=["Z", "X", "Y"]) ejecuta HOME secuencial en ese orden.
+- move_to() recibe objetivos absolutos y calcula un tiempo común para sincronizar los ejes solicitados.
+- El segundo move_to() demuestra que los objetivos son absolutos, no relativos.
+
+
+11. EJEMPLO 5 - USO AVANZADO O CASO COMPLETO
+
+Objetivo:
+Mostrar un flujo completo de controlador avanzado con HOME, perfil trapezoidal, planificación sincronizada, movimiento absoluto, movimiento relativo, espera, estado y paro general.
+
+Este ejemplo usa wait=False para mostrar que el controlador puede iniciar el movimiento y luego supervisarlo con wait_until_done(). Internamente, wait_until_done() llama update() en los ejes ocupados.
+
+Código completo:
+
+INICIO CODIGO EJEMPLO 5
+from objAdvanceMotionControler import (
+    AdvancedMotionController,
+    PROFILE_CONSTANT,
+    PROFILE_TRAPEZOIDAL,
+)
+from objAdvanceStepperAxis import AdvancedBeltStepperAxis, AdvancedScrewStepperAxis
+
+# Crear ejes. Ajustar todos los pines, límites y parámetros mecánicos al hardware real.
+eje_x = AdvancedBeltStepperAxis(
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=90.0,
+    acceleration_mm_s2=250.0,
+    deceleration_mm_s2=250.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=8.0,
+    home_backoff_mm=3.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+)
+
+eje_y = AdvancedBeltStepperAxis(
+    name="Y",
+    step_pin=6,
+    dir_pin=7,
+    enable_pin=8,
+    sm_id=1,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=90.0,
+    acceleration_mm_s2=250.0,
+    deceleration_mm_s2=250.0,
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    home_pin=9,
+    home_direction=-1,
+    home_speed_mm_s=8.0,
+    home_backoff_mm=3.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+)
+
+eje_z = AdvancedScrewStepperAxis(
+    name="Z",
+    step_pin=10,
+    dir_pin=11,
+    enable_pin=12,
+    sm_id=2,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    max_speed_mm_s=25.0,
+    acceleration_mm_s2=100.0,
+    deceleration_mm_s2=100.0,
+    screw_lead_mm=8.0,
+    home_pin=13,
+    home_direction=-1,
+    home_speed_mm_s=3.0,
+    home_backoff_mm=2.0,
+    min_position_mm=0.0,
+    max_position_mm=80.0,
+)
+
+controlador = AdvancedMotionController({"X": eje_x, "Y": eje_y, "Z": eje_z})
+controlador.enable_all()
+
+try:
+    # 1) Referenciar todos los ejes.
+    if not controlador.home_all(sequence=["Z", "X", "Y"]):
+        print("Error de HOME:", controlador.get_status())
+        controlador.stop_all()
+    else:
+        # 2) Crear un plan sincronizado antes de mover.
+        plan = controlador.create_synchronized_profile_plan(
+            {"X": 120.0, "Y": 60.0, "Z": 12.0},
+            profile_mode=PROFILE_TRAPEZOIDAL,
+        )
+        print("Plan sincronizado:", plan)
+
+        # 3) Movimiento absoluto con perfil trapezoidal, no bloqueante.
+        if controlador.move_to({"X": 120.0, "Y": 60.0, "Z": 12.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=False):
+            controlador.wait_until_done()
+        print("Estado después de movimiento absoluto:", controlador.get_status())
+
+        # 4) Movimiento relativo. X avanza 10 mm, Y retrocede 20 mm, Z sube 3 mm.
+        controlador.move_relative({"X": 10.0, "Y": -20.0, "Z": 3.0}, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+        print("Estado después de movimiento relativo:", controlador.get_status())
+
+        # 5) Movimiento absoluto con perfil constante para un desplazamiento simple de X/Y.
+        controlador.move_to({"X": 50.0, "Y": 50.0}, profile_mode=PROFILE_CONSTANT, wait=True)
+        print("Último plan:", controlador.get_last_plan())
+        print("Posiciones finales:", controlador.get_position())
+
+        # 6) Paro general de demostración al final del flujo.
+        controlador.stop_all()
+        print("Estado después de stop_all:", controlador.get_status())
+
+finally:
+    # Deshabilitar drivers al terminar o ante cualquier salida del flujo.
+    controlador.disable_all()
+FIN CODIGO EJEMPLO 5
+
+Explicación del flujo completo:
+
+- Se importan AdvancedMotionController y los modos PROFILE_CONSTANT y PROFILE_TRAPEZOIDAL.
+- Se crean tres ejes externos con parámetros mecánicos y de seguridad.
+- Se registra X, Y y Z en el controlador.
+- enable_all() habilita todos los drivers.
+- home_all() ejecuta HOME secuencial para asegurar referencias válidas.
+- create_synchronized_profile_plan() calcula el plan común antes del movimiento. Esto permite revisar common_time_s, distancias y objetivos.
+- move_to(..., wait=False) inicia el movimiento absoluto y devuelve el control al programa.
+- wait_until_done() supervisa los ejes hasta terminar.
+- move_relative() genera objetivos absolutos a partir de desplazamientos relativos.
+- PROFILE_CONSTANT solicita perfil de velocidad constante cuando conviene un movimiento simple.
+- get_last_plan() permite revisar el último plan calculado por el controlador.
+- stop_all() detiene todos los ejes y cambia el estado del controlador a STOPPED.
+- disable_all() deshabilita drivers al final del flujo.
+
+Nota:
+El uso de try/finally no rodea importaciones. Solo asegura que los drivers se deshabiliten al terminar el flujo de ejecución.
+
+
+12. DIAGRAMA DE USO ENTRE OBJETOS
+
+Relación típica para este archivo controlador:
+
++-----------------------------+
+| AdvancedMotionController    |
+| objAdvanceMotionControler.py|
++-----------------------------+
+              |
+              |
+      +-------+-------+
+      |       |       |
+      v       v       v
+   Eje X   Eje Y   Eje Z
+      |       |       |
+      |       |       |
+      v       v       v
++-------------------+  +-------------------+  +--------------------+
+| AdvancedBeltStepper| | AdvancedBeltStepper| | AdvancedScrewStepper|
+| Axis para X        | | Axis para Y        | | Axis para Z         |
++-------------------+  +-------------------+  +--------------------+
+      |                    |                    |
+      v                    v                    v
+ Driver X              Driver Y              Driver Z
+ STEP/DIR/ENABLE       STEP/DIR/ENABLE       STEP/DIR/ENABLE
+      |                    |                    |
+      v                    v                    v
+ Motor X               Motor Y               Motor Z
+
+Resumen:
+
+- AdvancedMotionController coordina.
+- Los ejes externos calculan pasos/mm, controlan pines, ejecutan HOME y generan pulsos.
+- Los drivers externos entregan corriente a los motores.
+- La Pico solo entrega señales de control, no potencia de motor.
+
+
+13. DIAGRAMA DE LLAMADAS TÍPICAS
+
+Flujo típico con AdvancedMotionController:
+
+Crear ejes externos
+|
+v
+Crear AdvancedMotionController
+|
+v
+add_axis() o pasar axes en el constructor
+|
+v
+enable_all()
+|
+v
+home_all()
+|
+v
+create_synchronized_profile_plan()
+|
+v
+move_to()
+|
+v
+wait_until_done()
+|
+v
+move_relative()
+|
+v
+get_position() / get_status() / get_last_plan()
+|
+v
+stop_all() si se requiere paro
+|
+v
+disable_all()
+
+Flujo típico de movimiento absoluto:
+
+Objetivo absoluto {"X": 150.0, "Y": 70.0}
+|
+v
+_validar ejes registrados
+|
+v
+_validar HOME
+|
+v
+_validar límites con validate_target()
+|
+v
+calcular tiempo común
+|
+v
+llamar start_move_to_mm() en cada eje que se mueve
+|
+v
+wait_until_done() llama update() mientras los ejes están ocupados
+|
+v
+estado final IDLE o ERROR/STOPPED
+
+
+14. EXPLICACIÓN DE LOS 5 EJEMPLOS
+
+Ejemplo 1:
+
+- Parámetros usados: axes mediante add_axis(), axis_name="X", profile_mode=PROFILE_TRAPEZOIDAL, wait=True.
+- Parámetros de eje externo usados: name, step_pin, dir_pin, enable_pin, sm_id, motor_steps_per_rev, microsteps, max_speed_mm_s, acceleration_mm_s2, deceleration_mm_s2, pulley_teeth y belt_pitch_mm.
+- Sirve como base para entender la conexión mínima entre un eje y el controlador.
+- Conviene usarlo al inicio, con motor sin carga y movimientos muy cortos.
+
+Ejemplo 2:
+
+- Agrega parámetros de HOME: home_pin, home_direction, home_speed_mm_s, home_backoff_mm y home_active_low.
+- Usa home_all(sequence=["X"]) antes de mover.
+- Sirve como base para pruebas reales con sensor HOME.
+- Conviene usarlo cuando ya se comprobó que el sensor HOME funciona.
+
+Ejemplo 3:
+
+- Agrega límites min_position_mm y max_position_mm.
+- Agrega invert_direction=True.
+- Muestra qué sucede al pedir un objetivo fuera de rango.
+- Conviene usarlo para validar seguridad de software antes de movimientos largos.
+
+Ejemplo 4:
+
+- Agrega varios ejes: X, Y y Z.
+- Usa dos ejes por banda y un eje por tornillo.
+- Usa sm_id diferente para cada eje.
+- Incluye movimiento absoluto sincronizado.
+- Conviene usarlo como base para sistemas XYZ.
+
+Ejemplo 5:
+
+- Agrega un flujo completo: home_all, create_synchronized_profile_plan, move_to, wait_until_done, move_relative, get_status, get_last_plan, stop_all y disable_all.
+- Usa PROFILE_TRAPEZOIDAL y PROFILE_CONSTANT.
+- Muestra movimiento no bloqueante con wait=False.
+- Conviene usarlo como base para integrar el controlador en una aplicación principal más completa.
+
+Comparación general:
+
+- Use el ejemplo 1 para aprender la estructura mínima.
+- Use el ejemplo 2 para trabajar con HOME real.
+- Use el ejemplo 3 para ajustar límites y dirección.
+- Use el ejemplo 4 para coordinar una máquina XYZ.
+- Use el ejemplo 5 para un ciclo completo de operación y diagnóstico.
+
+
+15. ERRORES COMUNES AL INSTANCIAR
+
+- Repetir sm_id en dos ejes.
+  Cada eje con PIO debe usar una StateMachine diferente. Si X usa sm_id=0, Y no debe usar sm_id=0.
+
+- Usar pines repetidos.
+  No use el mismo GPIO para STEP, DIR, ENABLE o HOME de varios ejes, salvo que el diseño electrónico lo justifique claramente.
+
+- No compartir GND.
+  La Pico y los drivers deben compartir tierra. Sin GND común, las señales STEP/DIR/ENABLE pueden ser inestables o no funcionar.
+
+- Alimentar motores desde la Pico.
+  La Pico no puede alimentar motores a pasos. Use una fuente externa para los drivers.
+
+- Configurar mal microsteps.
+  El valor microsteps del software debe coincidir con la configuración real del driver. Si no coincide, las distancias serán incorrectas.
+
+- No hacer HOME antes de mover.
+  AdvancedMotionController valida que los ejes tengan HOME antes de move_to(). Si no tienen HOME, el movimiento falla.
+
+- Simular is_homed_flag en operación real.
+  Solo se acepta para pruebas controladas. En operación real use home_all() y sensores reales.
+
+- Poner límites incorrectos.
+  Si max_position_mm es mayor que el recorrido físico, puede haber choques. Si es demasiado bajo, movimientos válidos fallarán.
+
+- Confundir movimiento absoluto con relativo.
+  move_to({"X": 70.0}) va a X=70.0 absoluto. Para sumar 70 mm use move_relative({"X": 70.0}).
+
+- Usar una velocidad demasiado alta.
+  Puede causar pérdida de pasos, vibración o paro mecánico. Empiece con velocidades bajas.
+
+- Invertir mal el sensor HOME.
+  Si home_active_low está mal configurado, el eje puede creer que el sensor está activo todo el tiempo o nunca detectarlo.
+
+- No configurar correctamente polea, banda o tornillo.
+  pulley_teeth, belt_pitch_mm y screw_lead_mm afectan steps_per_mm. Si están mal, la posición real no coincidirá con la posición calculada.
+
+- Usar perfil constante sin revisar max_speed_mm_s.
+  En PROFILE_CONSTANT el controlador usa la velocidad máxima del eje para calcular tiempos. Revise que sea segura.
+
+- Registrar nombres de ejes inesperados.
+  El controlador normaliza a mayúsculas, pero los diccionarios deben usar nombres claros como "X", "Y" y "Z".
+
+- Pedir movimiento a un eje no registrado.
+  Si se llama move_to({"A": 10.0}) sin haber registrado A, el controlador entra en ERROR.
+
+
+16. CHECKLIST ANTES DE PROBAR EN HARDWARE REAL
+
+- Driver conectado correctamente.
+- Fuente del motor conectada al driver, no a la Pico.
+- GND común entre Pico y drivers.
+- STEP revisado con el GPIO correcto.
+- DIR revisado con el GPIO correcto.
+- ENABLE revisado con la polaridad correcta.
+- Motor conectado al driver con bobinas identificadas.
+- Motor sin carga al inicio o con carga segura.
+- Corriente del driver ajustada a un valor seguro.
+- Microsteps del driver coinciden con el valor del software.
+- Velocidad baja para la primera prueba.
+- Aceleración baja para la primera prueba.
+- Sensor HOME probado antes de mover.
+- home_active_low verificado.
+- home_direction verificado con recorrido libre.
+- home_backoff_mm suficiente para liberar el sensor.
+- Límites min_position_mm y max_position_mm revisados.
+- sm_id único para cada eje.
+- Pines sin repetirse accidentalmente.
+- Paro de emergencia disponible.
+- Movimiento corto de prueba, por ejemplo 1 mm a 5 mm.
+- Persona supervisando la primera prueba.
+- Herramientas y manos fuera del área móvil.
+
+
+17. CONCLUSIÓN
+
+Los ejemplos de este archivo muestran cómo usar objAdvanceMotionControler.py como controlador avanzado para coordinar ejes de un sistema XYZ con motores a pasos.
+
+La idea principal es crear primero los ejes con sus parámetros reales de hardware, registrarlos en AdvancedMotionController y luego usar métodos como home_all(), move_to(), move_relative(), wait_until_done(), get_status(), get_position(), stop_all(), enable_all() y disable_all().
+
+Se recomienda empezar con el ejemplo más básico, usando un solo eje, baja velocidad y un movimiento corto. Después conviene avanzar al ejemplo con HOME, luego agregar límites, después probar varios ejes y finalmente usar el flujo completo del ejemplo avanzado.
+
+Todos los valores deben calibrarse según el hardware real: pines, microsteps, velocidad, aceleración, límites, polea, banda, tornillo, dirección, polaridad de ENABLE y polaridad del sensor HOME.
+
+Antes de operar una máquina real, valide sensores, límites, dirección, GND común, alimentación de drivers y paro de emergencia.
