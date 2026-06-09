@@ -1,0 +1,1861 @@
+MANUAL TÉCNICO: objMotionControler.py
+Controlador básico de movimiento multi-eje para coordinar objetos StepperAxis en un sistema cartesiano XYZ con Raspberry Pi Pico/RP2040 y MicroPython.
+
+================================================================================
+1. TÍTULO DEL MANUAL
+================================================================================
+
+Manual técnico del archivo analizado: objMotionControler.py
+
+Propósito breve:
+    Este archivo implementa la clase MotionController, una capa lógica de
+    coordinación para varios ejes de motores a pasos. Su objetivo es registrar
+    objetos de eje, validar movimientos, ejecutar HOME secuencial, iniciar
+    movimientos absolutos o relativos de forma no bloqueante en cada eje,
+    esperar su finalización y centralizar el estado general del sistema.
+
+    El módulo no genera pulsos STEP, no manipula pines GPIO, no configura PIO y
+    no implementa perfiles de aceleración. Trabaja por composición sobre objetos
+    de eje ya existentes, por ejemplo BeltStepperAxis o ScrewStepperAxis, que sí
+    son responsables del hardware y de la generación de pulsos.
+
+================================================================================
+2. INTRODUCCIÓN
+================================================================================
+
+objMotionControler.py sirve para coordinar el movimiento de varios ejes en una
+máquina cartesiana X/Y/Z controlada con Raspberry Pi Pico o RP2040 usando
+MicroPython. El módulo recibe comandos de alto nivel expresados en milímetros,
+por ejemplo mover X a 150 mm y Y a 80 mm, y los reparte a los objetos de eje que
+ya fueron registrados en el controlador.
+
+Parte del proyecto en la que se usa:
+    Este archivo pertenece a la capa de control de movimiento multi-eje del
+    proyecto de motores a pasos. Normalmente se ubica por encima de los módulos
+    que controlan un eje individual, como objStepperAxis.py, y por debajo de la
+    lógica de aplicación, recetas, secuencias o interfaz de usuario que solicita
+    posiciones cartesianas.
+
+Clasificación funcional:
+    - Control de ejes: indirecto. No controla bobinas, pines ni drivers, pero
+      administra objetos de eje.
+    - Control de movimiento: sí. Coordina movimientos absolutos y relativos de
+      varios ejes.
+    - Perfil avanzado: no. No calcula aceleración, rampa trapezoidal ni tiempo
+      común de sincronización.
+    - PIO: no usa PIO directamente. Depende de ejes que pueden usar PIO para
+      generar pulsos STEP.
+    - Sincronización: básica. Inicia los ejes solicitados en el mismo bloque de
+      ejecución, pero no ajusta velocidades para que todos terminen exactamente
+      al mismo tiempo.
+
+Problema que resuelve dentro del sistema XYZ con Raspberry Pi Pico:
+    En un sistema cartesiano, cada eje tiene su propia posición, límites,
+    velocidad, HOME y estado. Sin un controlador de alto nivel, el programa
+    principal tendría que validar cada eje manualmente antes de moverlo. Este
+    módulo centraliza esas tareas: verifica que los ejes existan, que no estén
+    ocupados, que tengan HOME, que los objetivos sean válidos, inicia los
+    movimientos y detecta errores globales. Así, la aplicación puede trabajar
+    con coordenadas XYZ en lugar de manejar cada eje de forma aislada.
+
+================================================================================
+3. CONTEXTO GENERAL DEL PROYECTO
+================================================================================
+
+El proyecto consiste en controlar motores a pasos de un sistema cartesiano X/Y/Z.
+Cada eje representa un movimiento lineal físico. Un eje puede estar construido
+con correa GT2, polea, husillo, tornillo trapezoidal u otro mecanismo mecánico.
+
+Plataforma usada:
+    - Raspberry Pi Pico o placa compatible basada en RP2040.
+    - Firmware MicroPython.
+    - Objetos de eje escritos en Python/MicroPython.
+    - Drivers externos para motores a pasos.
+
+Control de drivers externos:
+    Los motores no se conectan directamente al RP2040. Se controlan mediante
+    drivers como A4988, DRV8825, TMC, TB6600 u otros equivalentes. Las señales
+    típicas son:
+
+    STEP:
+        Pulso que ordena al driver avanzar un paso o micro-paso.
+
+    DIR:
+        Nivel lógico que define el sentido de giro del motor.
+
+    ENABLE:
+        Señal que habilita o deshabilita la etapa de potencia del driver.
+
+Relación de objMotionControler.py con los demás módulos:
+    - objStepperAxis.py o módulos equivalentes:
+        Definen los objetos de eje individuales. Esos objetos conocen sus pines,
+        límites, pasos por milímetro, sensor HOME, velocidad y generación de
+        pulsos. MotionController espera que esos ejes expongan una API pública
+        compatible.
+
+    - objAdvanceStepperAxis.py:
+        Puede representar una versión avanzada del eje. MotionController básico
+        puede funcionar con cualquier objeto que implemente los métodos usados,
+        aunque no aprovecha funciones avanzadas de perfil sincronizado.
+
+    - objAdvanceMotionControler.py:
+        Es una versión más avanzada de controlador multi-eje. A diferencia del
+        archivo analizado aquí, la versión avanzada puede calcular un tiempo
+        común y perfiles sincronizados.
+
+    - Programas de aplicación o secuencias:
+        Llaman a MotionController para hacer HOME, mover a coordenadas, detener,
+        habilitar/deshabilitar drivers y consultar estado global.
+
+Uso de PIO:
+    Este archivo no contiene ningún programa PIO. Sin embargo, su diseño asume
+    que cada eje puede usar su propia StateMachine de PIO para producir pulsos
+    STEP de manera precisa. PIO es útil en RP2040 porque permite generar señales
+    temporizadas sin depender de bucles de MicroPython, que pueden tener jitter o
+    pausas por interpretación.
+
+Naturaleza del controlador:
+    MotionController no controla pines directamente. Coordina objetos de eje por
+    composición. El objeto controlador sabe qué ejes existen y cuándo deben
+    arrancar o detenerse; cada eje sabe cómo ejecutar físicamente el movimiento.
+
+================================================================================
+4. RESUMEN DEL ARCHIVO
+================================================================================
+
+Cantidad de clases contenidas en el archivo:
+    1 clase.
+
+Clase encontrada:
+    1) MotionController
+        Controlador básico de alto nivel para registrar, validar, mover,
+        detener, habilitar, deshabilitar y consultar varios ejes.
+
+Constantes globales:
+    - STATE_IDLE = "IDLE"
+    - STATE_MOVING = "MOVING"
+    - STATE_HOMING = "HOMING"
+    - STATE_ERROR = "ERROR"
+    - STATE_STOPPED = "STOPPED"
+    - AXIS_STATE_MOVING = "MOVING"
+    - AXIS_STATE_HOMING = "HOMING"
+    - AXIS_STATE_ERROR = "ERROR"
+    - AXIS_STATE_STOPPED = "STOPPED"
+
+Funciones auxiliares globales:
+    No hay funciones auxiliares globales definidas fuera de la clase.
+
+Programa PIO:
+    No hay programa PIO en este archivo.
+
+Estructuras principales:
+    - self.axes:
+        Diccionario que almacena objetos de eje por nombre normalizado.
+
+    - self.state:
+        Estado global del controlador.
+
+    - self.error:
+        Último mensaje de error del controlador.
+
+Importaciones:
+    - import time:
+        Se usa para llamar time.sleep_ms(1) durante la espera de finalización.
+
+================================================================================
+5. CANTIDAD DE CLASES
+================================================================================
+
+Número total de clases:
+    1
+
+Clase 1: MotionController
+    Responsabilidad:
+        Coordinar varios ejes de motores a pasos. Permite agregar ejes,
+        consultar ejes, ejecutar movimientos absolutos, ejecutar movimientos
+        relativos, realizar HOME secuencial, detener todos los ejes, habilitar o
+        deshabilitar drivers mediante cada eje, cambiar velocidades, obtener
+        posiciones, verificar HOME global y consultar el estado completo.
+
+    Relación entre clases:
+        MotionController no hereda de ninguna clase del proyecto. Usa
+        composición: mantiene referencias a objetos de eje dentro de self.axes.
+
+    Relación lógica esperada:
+        MotionController
+            contiene 0..N objetos de eje compatibles con la interfaz esperada:
+                - start_move_to_mm(target_mm)
+                - get_position()
+                - get_status()
+                - is_busy()
+                - is_homed()
+                - validate_target(target_mm)
+                - home()
+                - stop()
+                - enable()
+                - disable()
+                - set_speed_mm_s(speed_mm_s)
+
+    Compatibilidad flexible:
+        El controlador usa hasattr() en varios puntos. Esto permite trabajar con
+        versiones de ejes que exponen métodos públicos o atributos internos
+        alternativos, por ejemplo state, done, _move_done o is_homed_flag.
+
+================================================================================
+6. CANTIDAD DE VARIABLES Y ATRIBUTOS PRINCIPALES
+================================================================================
+
+6.1 Constantes globales de estado del controlador
+
+    STATE_IDLE
+        Indica que el controlador está en reposo y no ejecuta movimiento ni HOME.
+
+    STATE_MOVING
+        Indica que el controlador considera que hay movimiento activo.
+
+    STATE_HOMING
+        Indica que se está ejecutando una rutina de HOME mediante home_all().
+
+    STATE_ERROR
+        Indica que ocurrió un error de validación, registro, HOME, movimiento o
+        ejecución de un eje.
+
+    STATE_STOPPED
+        Indica que se ejecutó un paro general o que un eje entró en STOPPED.
+
+6.2 Constantes globales de estados esperados en ejes
+
+    AXIS_STATE_MOVING
+        Texto usado para reconocer que un eje está moviéndose.
+
+    AXIS_STATE_HOMING
+        Texto usado para reconocer que un eje está haciendo HOME.
+
+    AXIS_STATE_ERROR
+        Texto usado para reconocer que un eje falló.
+
+    AXIS_STATE_STOPPED
+        Texto usado para reconocer que un eje fue detenido.
+
+6.3 Atributos principales de MotionController
+
+    Variables de configuración:
+        axes, parámetro opcional del constructor
+            Diccionario inicial de ejes. Ejemplo: {"X": eje_x, "Y": eje_y,
+            "Z": eje_z}. Es opcional; también se pueden agregar ejes después con
+            add_axis().
+
+    Variables de estado:
+        self.state
+            Estado actual del controlador. Cambia entre IDLE, MOVING, HOMING,
+            ERROR y STOPPED según la operación.
+
+        self.error
+            Texto con el último error detectado. Es None cuando no hay error
+            activo.
+
+    Variables de hardware:
+        self.axes
+            Diccionario de referencias a objetos de eje. No contiene pines de
+            hardware directamente; cada valor del diccionario es un objeto que
+            encapsula su propio hardware.
+
+    Variables de movimiento:
+        normalized_targets, variable local en move_to()
+            Diccionario de destinos absolutos con nombres de eje normalizados.
+
+        started_axes, variable local en move_to()
+            Lista de ejes que ya arrancaron. Si falla el arranque de un eje
+            posterior, el controlador intenta detener los que ya habían iniciado.
+
+        targets, variable local en move_relative()
+            Diccionario de objetivos absolutos calculados desde desplazamientos
+            relativos.
+
+        positions, variable local en get_position()
+            Diccionario de posiciones actuales devueltas por cada eje.
+
+    Variables de error:
+        message, parámetro de _set_error()
+            Texto que se guarda en self.error.
+
+        axis_error, variable local en varios métodos
+            Error específico leído desde axis.error cuando el eje lo expone.
+
+6.4 Variables y atributos esperados en cada eje registrado
+
+    Aunque no se definen dentro de este archivo, MotionController puede leer o
+    llamar los siguientes elementos del objeto de eje:
+
+    Variables o métodos de configuración del eje:
+        - set_speed_mm_s(speed_mm_s)
+        - validate_target(target_mm) o _validate_target(target_mm)
+
+    Variables o métodos de estado:
+        - get_status()
+        - state
+        - is_busy()
+        - is_homed()
+        - is_homed_flag
+        - done
+        - _move_done
+
+    Variables o métodos de hardware:
+        - enable()
+        - disable()
+        - stop()
+
+    Variables o métodos de movimiento:
+        - start_move_to_mm(target_mm)
+        - get_position()
+        - wait_until_done()
+        - home()
+
+    Variables de error del eje:
+        - error
+
+================================================================================
+7. ENTRADAS DEL MÓDULO
+================================================================================
+
+7.1 Entrada del constructor MotionController(axes=None)
+
+    axes:
+        Tipo esperado: dict o None.
+        Obligatorio: no.
+        Descripción: diccionario opcional con objetos de eje ya creados.
+        Ejemplo válido:
+            {"X": eje_x, "Y": eje_y, "Z": eje_z}
+        Observación:
+            Las claves se normalizan a mayúsculas. Por eso "x" y "X" se tratan
+            como el mismo nombre lógico.
+
+7.2 Entradas de add_axis(axis_name, axis_object)
+
+    axis_name:
+        Tipo esperado: texto, número o cualquier objeto convertible a str.
+        Obligatorio: sí.
+        Ejemplos válidos: "X", "Y", "Z", "x".
+
+    axis_object:
+        Tipo esperado: objeto de eje compatible con la API esperada.
+        Obligatorio: sí.
+        Debe implementar al menos los métodos que se usarán según la operación,
+        por ejemplo start_move_to_mm(), get_position(), home(), stop(), etc.
+
+7.3 Entradas de get_axis(axis_name)
+
+    axis_name:
+        Tipo esperado: valor convertible a texto.
+        Obligatorio: sí.
+        Ejemplo: "X".
+
+7.4 Entradas de move_to(targets, wait=True)
+
+    targets:
+        Tipo esperado: dict.
+        Obligatorio: sí.
+        Descripción: objetivos absolutos en milímetros por eje.
+        Ejemplos válidos:
+            {"X": 150}
+            {"X": 150, "Y": 80}
+            {"X": 120.5, "Y": 40.0, "Z": 10}
+
+    wait:
+        Tipo esperado: bool.
+        Obligatorio: no.
+        Valor por defecto: True.
+        Descripción:
+            Si True, move_to() llama wait_until_done() y bloquea hasta que los
+            ejes terminen o ocurra un error. Si False, arranca el movimiento y
+            retorna inmediatamente.
+
+    Valores típicos para máquina XYZ tipo Ender 3 V2 o similar:
+        X: 0 a 220 mm aproximadamente.
+        Y: 0 a 220 mm aproximadamente.
+        Z: 0 a 250 mm aproximadamente.
+        Nota: estos rangos dependen de cómo estén configurados los límites del
+        objeto de eje. MotionController delega la validación real en el eje.
+
+7.5 Entradas de move_relative(distances, wait=True)
+
+    distances:
+        Tipo esperado: dict.
+        Obligatorio: sí.
+        Descripción: desplazamientos relativos en milímetros por eje.
+        Ejemplos válidos:
+            {"X": 10}
+            {"Y": -5}
+            {"X": 20, "Z": 2.5}
+
+    wait:
+        Tipo esperado: bool.
+        Obligatorio: no.
+        Valor por defecto: True.
+
+7.6 Entradas de home_all(sequence=None)
+
+    sequence:
+        Tipo esperado: lista, tupla u otro iterable de nombres de eje, o None.
+        Obligatorio: no.
+        Valor por defecto: None.
+        Descripción:
+            Si es None, el controlador hace HOME en el orden de los ejes
+            registrados en self.axes. Si se proporciona, ejecuta HOME en el orden
+            indicado.
+        Ejemplo válido:
+            ["Z", "X", "Y"]
+        Uso típico:
+            En máquinas cartesianas puede convenir subir o referenciar Z antes
+            de mover X/Y, según la mecánica.
+
+7.7 Entradas de set_axis_speed(axis_name, speed_mm_s)
+
+    axis_name:
+        Tipo esperado: nombre de eje convertible a texto.
+        Obligatorio: sí.
+
+    speed_mm_s:
+        Tipo esperado: número int o float.
+        Obligatorio: sí.
+        Unidad: milímetros por segundo.
+        Ejemplos iniciales prudentes:
+            X/Y con correa: 10 a 40 mm/s durante pruebas iniciales.
+            Z con husillo: 1 a 5 mm/s durante pruebas iniciales.
+        Nota:
+            La validación final depende del método set_speed_mm_s() del eje.
+
+7.8 Entradas de set_all_speeds(speed_mm_s)
+
+    speed_mm_s:
+        Tipo esperado: número int o float.
+        Obligatorio: sí.
+        Descripción: velocidad fija aplicada a todos los ejes registrados.
+        Precaución:
+            No siempre conviene usar la misma velocidad para X/Y/Z porque Z suele
+            tener mecánica distinta y puede requerir valores mucho menores.
+
+7.9 Métodos sin entradas externas relevantes
+
+    wait_until_done()
+    stop_all()
+    enable_all()
+    disable_all()
+    get_position()
+    all_homed()
+    is_busy()
+    get_status()
+
+================================================================================
+8. SALIDAS DEL MÓDULO
+================================================================================
+
+8.1 Salidas booleanas principales
+
+    add_axis()
+        Devuelve True cuando agrega o reemplaza el eje.
+
+    move_to()
+        Devuelve True si el movimiento se inició y, si wait=True, terminó sin
+        error. Devuelve False si hay error de targets, eje no registrado, eje
+        ocupado, eje sin HOME, objetivo inválido o fallo al arrancar un eje.
+
+    move_relative()
+        Devuelve lo mismo que move_to(), porque convierte distancias relativas a
+        objetivos absolutos y delega la ejecución.
+
+    wait_until_done()
+        Devuelve True si todos los ejes finalizan correctamente. Devuelve False
+        si algún eje entra en ERROR o STOPPED.
+
+    home_all()
+        Devuelve True si todos los HOME de la secuencia terminan correctamente.
+        Devuelve False si falta un eje, un eje no tiene home() o home() falla.
+
+    stop_all()
+        Devuelve True después de llamar stop() en todos los ejes.
+
+    enable_all() y disable_all()
+        Devuelven True después de llamar enable() o disable() en todos los ejes.
+
+    set_axis_speed()
+        Devuelve True si el eje acepta la velocidad. Devuelve False si el eje no
+        existe o set_speed_mm_s() falla.
+
+    set_all_speeds()
+        Devuelve True si todos los ejes aceptan la velocidad. Devuelve False en
+        el primer eje que falle.
+
+    all_homed()
+        Devuelve True si todos los ejes registrados reportan HOME. Devuelve
+        False si al menos uno no está referenciado.
+
+    is_busy()
+        Devuelve True si el controlador está en MOVING/HOMING o si algún eje
+        está ocupado. Devuelve False cuando no hay actividad detectada.
+
+8.2 Salidas por diccionario
+
+    get_position()
+        Devuelve un diccionario con posiciones actuales en milímetros.
+        Ejemplo:
+            {"X": 100.0, "Y": 50.0, "Z": 10.0}
+
+    get_status()
+        Devuelve un diccionario con:
+            - controller_state: estado global del controlador.
+            - controller_error: último error o None.
+            - all_homed: booleano global de HOME.
+            - positions: diccionario de posiciones por eje.
+            - axes: estado detallado por eje, usando axis.get_status() si existe.
+
+        Ejemplo conceptual:
+            {
+                "controller_state": "IDLE",
+                "controller_error": None,
+                "all_homed": True,
+                "positions": {"X": 10.0, "Y": 20.0},
+                "axes": {
+                    "X": {"state": "IDLE", "homed": True},
+                    "Y": {"state": "IDLE", "homed": True}
+                }
+            }
+
+8.3 Salida de get_axis(axis_name)
+
+    Devuelve el objeto de eje registrado si existe. Devuelve None si no está
+    registrado.
+
+8.4 Estados internos importantes
+
+    IDLE:
+        Sistema listo para recibir nuevos movimientos.
+
+    MOVING:
+        Hay movimiento activo o se está esperando que los ejes terminen.
+
+    HOMING:
+        Se está ejecutando HOME secuencial.
+
+    ERROR:
+        Hay un error que debe revisarse en self.error o get_status().
+
+    STOPPED:
+        Se detuvo el movimiento. La posición puede no ser confiable hasta hacer
+        HOME nuevamente, dependiendo de cómo implemente stop() cada eje.
+
+8.5 Mensajes de error
+
+    El controlador almacena errores como texto en self.error. Algunos ejemplos:
+        - "targets no puede ser None"
+        - "distances no puede ser None"
+        - "Eje no registrado: X"
+        - "El eje X esta ocupado"
+        - "El eje X requiere HOME"
+        - "Objetivo invalido en eje X"
+        - "No se pudo iniciar eje X"
+        - "Fallo HOME en eje X"
+        - "Movimiento detenido; se requiere HOME nuevamente en los ejes"
+
+================================================================================
+9. CLASES DEL ARCHIVO
+================================================================================
+
+9.1 MotionController
+
+    Propósito:
+        Representar un controlador de movimiento básico para varios ejes. Su
+        función es coordinar objetos de eje individuales y ofrecer una API de
+        alto nivel para operaciones comunes de una máquina XYZ.
+
+    Cuándo se debe usar:
+        - Cuando se tienen dos o más objetos de eje ya configurados.
+        - Cuando se desea mover por coordenadas absolutas o relativas.
+        - Cuando se necesita ejecutar HOME de todos los ejes desde un punto
+          centralizado.
+        - Cuando se desea consultar el estado global de la máquina.
+        - Cuando no se requiere sincronización avanzada de velocidades ni perfil
+          trapezoidal multi-eje.
+
+    Qué objetos representa:
+        No representa un motor físico ni un eje físico directamente. Representa
+        el conjunto lógico de ejes de una máquina, por ejemplo X/Y/Z.
+
+    Parámetros del constructor:
+        axes=None
+            Diccionario opcional de ejes. Si se entrega, el constructor llama
+            add_axis() para cada entrada.
+
+    Atributos internos principales:
+        self.axes
+            Diccionario de ejes registrados.
+
+        self.state
+            Estado global del controlador.
+
+        self.error
+            Último error global.
+
+    Métodos principales:
+        - add_axis()
+        - get_axis()
+        - move_to()
+        - move_relative()
+        - wait_until_done()
+        - home_all()
+        - stop_all()
+        - get_position()
+        - get_status()
+
+    Métodos secundarios o auxiliares:
+        - _normalize_axis_name()
+        - _set_error()
+        - _clear_error()
+        - _axis_state()
+        - _axis_done()
+        - _axis_is_busy()
+        - _axis_is_homed()
+        - _validate_axis_target()
+        - enable_all()
+        - disable_all()
+        - set_axis_speed()
+        - set_all_speeds()
+        - all_homed()
+        - is_busy()
+
+    Flujo típico de uso:
+        1) Crear los objetos de eje individuales.
+        2) Crear MotionController con un diccionario de ejes o vacío.
+        3) Registrar ejes con add_axis() si no se pasaron al constructor.
+        4) Habilitar drivers con enable_all().
+        5) Ejecutar HOME con home_all().
+        6) Verificar all_homed().
+        7) Ejecutar move_to() o move_relative().
+        8) Esperar finalización con wait_until_done() si el movimiento fue no
+           bloqueante.
+        9) Consultar posiciones con get_position() o estado con get_status().
+       10) Detener con stop_all() si hay emergencia o condición insegura.
+
+    Errores comunes:
+        - Intentar mover un eje no registrado.
+        - Intentar mover antes de hacer HOME.
+        - Enviar un objetivo fuera de límites.
+        - Usar wait=False y lanzar otro movimiento antes de que termine el
+          anterior.
+        - Registrar un objeto que no implementa la API mínima esperada.
+        - Usar una velocidad inadecuada para Z al aplicar set_all_speeds().
+
+    Recomendaciones de uso:
+        - Registrar ejes con nombres claros: "X", "Y" y "Z".
+        - Hacer HOME siempre antes del primer movimiento absoluto.
+        - Revisar get_status() después de cualquier False.
+        - Usar velocidades bajas durante pruebas iniciales.
+        - Preferir movimientos bloqueantes durante depuración.
+        - Después de stop_all(), repetir HOME para recuperar referencia.
+
+================================================================================
+10. FUNCIONES Y MÉTODOS
+================================================================================
+
+10.1 __init__(self, axes=None)
+    Clase:
+        MotionController
+    Propósito:
+        Inicializar el controlador, crear el diccionario de ejes y registrar ejes
+        iniciales si se entregan.
+    Entradas:
+        axes: dict opcional o None.
+    Salida:
+        No retorna valor explícito.
+    Efectos internos:
+        Inicializa self.axes, self.state y self.error. Llama add_axis() por cada
+        eje del diccionario inicial.
+    Bloqueante:
+        No.
+    Dependencias:
+        add_axis().
+    Posibles errores:
+        No valida profundamente los objetos de eje en el constructor.
+
+10.2 _normalize_axis_name(self, axis_name)
+    Clase:
+        MotionController
+    Propósito:
+        Convertir nombres de eje a texto en mayúsculas.
+    Entradas:
+        axis_name: valor convertible a str.
+    Salida:
+        str en mayúsculas.
+    Efectos internos:
+        Ninguno.
+    Bloqueante:
+        No.
+    Dependencias:
+        str().upper().
+    Posibles errores:
+        Poco probable; puede fallar solo si el objeto no puede convertirse a str.
+
+10.3 _set_error(self, message)
+    Clase:
+        MotionController
+    Propósito:
+        Registrar un error y pasar el controlador a STATE_ERROR.
+    Entradas:
+        message: texto o valor convertible a str.
+    Salida:
+        False.
+    Efectos internos:
+        self.error = str(message), self.state = STATE_ERROR.
+    Bloqueante:
+        No.
+    Dependencias:
+        Ninguna.
+    Posibles errores:
+        No esperados en uso normal.
+
+10.4 _clear_error(self)
+    Clase:
+        MotionController
+    Propósito:
+        Limpiar el último error del controlador.
+    Entradas:
+        Ninguna.
+    Salida:
+        None.
+    Efectos internos:
+        self.error = None.
+    Bloqueante:
+        No.
+    Dependencias:
+        Ninguna.
+    Posibles errores:
+        No esperados.
+
+10.5 _axis_state(self, axis)
+    Clase:
+        MotionController
+    Propósito:
+        Obtener el estado visible de un eje.
+    Entradas:
+        axis: objeto de eje.
+    Salida:
+        Estado del eje como texto o None.
+    Efectos internos:
+        Ninguno sobre el controlador. Puede llamar axis.get_status().
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        axis.get_status() o axis.state.
+    Posibles errores:
+        Si get_status() del eje lanza una excepción, este método no la captura.
+
+10.6 _axis_done(self, axis)
+    Clase:
+        MotionController
+    Propósito:
+        Detectar si un eje expone una bandera interna de finalización.
+    Entradas:
+        axis: objeto de eje.
+    Salida:
+        bool.
+    Efectos internos:
+        Ninguno.
+    Bloqueante:
+        No.
+    Dependencias:
+        axis._move_done o axis.done si existen.
+    Posibles errores:
+        No esperados en uso normal.
+
+10.7 _axis_is_busy(self, axis)
+    Clase:
+        MotionController
+    Propósito:
+        Saber si un eje está ocupado en movimiento o HOME.
+    Entradas:
+        axis: objeto de eje.
+    Salida:
+        bool.
+    Efectos internos:
+        Puede consultar axis.is_busy() o _axis_state().
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        axis.is_busy(), _axis_state().
+    Posibles errores:
+        Si el método is_busy() del eje falla, no se captura la excepción.
+
+10.8 _axis_is_homed(self, axis)
+    Clase:
+        MotionController
+    Propósito:
+        Determinar si un eje ya ejecutó HOME.
+    Entradas:
+        axis: objeto de eje.
+    Salida:
+        bool.
+    Efectos internos:
+        Puede llamar axis.is_homed() o axis.get_status().
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        axis.is_homed(), axis.is_homed_flag, axis.get_status().
+    Posibles errores:
+        Si el eje no expone ninguna forma de HOME, devuelve False.
+
+10.9 _validate_axis_target(self, axis, target_mm)
+    Clase:
+        MotionController
+    Propósito:
+        Validar un objetivo absoluto usando la API del eje.
+    Entradas:
+        axis: objeto de eje.
+        target_mm: número en milímetros.
+    Salida:
+        bool.
+    Efectos internos:
+        Puede cambiar self.error si el eje no implementa validación.
+    Bloqueante:
+        No.
+    Dependencias:
+        axis.validate_target() o axis._validate_target().
+    Posibles errores:
+        Devuelve False y pone ERROR si no hay método de validación.
+
+10.10 add_axis(self, axis_name, axis_object)
+    Clase:
+        MotionController
+    Propósito:
+        Agregar o reemplazar un eje registrado.
+    Entradas:
+        axis_name: nombre de eje.
+        axis_object: objeto de eje.
+    Salida:
+        True.
+    Efectos internos:
+        Inserta axis_object en self.axes con nombre normalizado.
+    Bloqueante:
+        No.
+    Dependencias:
+        _normalize_axis_name().
+    Posibles errores:
+        No valida que axis_object implemente la API completa.
+
+10.11 get_axis(self, axis_name)
+    Clase:
+        MotionController
+    Propósito:
+        Obtener un objeto de eje registrado.
+    Entradas:
+        axis_name: nombre de eje.
+    Salida:
+        Objeto de eje o None.
+    Efectos internos:
+        Ninguno.
+    Bloqueante:
+        No.
+    Dependencias:
+        _normalize_axis_name().
+    Posibles errores:
+        No esperados.
+
+10.12 move_to(self, targets, wait=True)
+    Clase:
+        MotionController
+    Propósito:
+        Ejecutar movimiento absoluto de uno o varios ejes.
+    Entradas:
+        targets: dict de objetivos absolutos en mm.
+        wait: bool opcional.
+    Salida:
+        bool.
+    Efectos internos:
+        Normaliza nombres, valida ejes, verifica que no haya ejes ocupados,
+        verifica HOME, valida límites, cambia state a MOVING, llama
+        start_move_to_mm() en cada eje y opcionalmente llama wait_until_done().
+    Modifica:
+        self.state, self.error. Indirectamente modifica posiciones de los ejes.
+    Bloqueante:
+        Sí si wait=True. No bloqueante si wait=False, salvo validaciones
+        iniciales.
+    Dependencias:
+        get_axis(), _axis_is_busy(), _axis_is_homed(), _validate_axis_target(),
+        axis.start_move_to_mm(), axis.stop(), wait_until_done().
+    Posibles errores:
+        targets None, eje no registrado, eje ocupado, eje sin HOME, objetivo
+        inválido, fallo de arranque.
+
+10.13 move_relative(self, distances, wait=True)
+    Clase:
+        MotionController
+    Propósito:
+        Ejecutar desplazamientos relativos convirtiéndolos primero a objetivos
+        absolutos.
+    Entradas:
+        distances: dict de desplazamientos en mm.
+        wait: bool opcional.
+    Salida:
+        bool.
+    Efectos internos:
+        Lee posición actual de cada eje con get_position(), suma el
+        desplazamiento y llama move_to().
+    Modifica:
+        Indirectamente modifica posiciones de los ejes si el movimiento se
+        ejecuta.
+    Bloqueante:
+        Igual que move_to(): depende de wait.
+    Dependencias:
+        get_axis(), axis.get_position(), move_to().
+    Posibles errores:
+        distances None, eje no registrado, distancia no convertible a float,
+        además de todos los errores posibles de move_to().
+
+10.14 wait_until_done(self)
+    Clase:
+        MotionController
+    Propósito:
+        Esperar hasta que todos los ejes registrados terminen movimiento u HOME.
+    Entradas:
+        Ninguna.
+    Salida:
+        True si termina correctamente, False si detecta ERROR o STOPPED.
+    Efectos internos:
+        Cambia state a MOVING al entrar, luego a IDLE si todo termina. Limpia el
+        error al finalizar correctamente. Si un eje terminó internamente pero
+        sigue visible como MOVING, llama axis.wait_until_done() para consolidar.
+    Modifica:
+        self.state, self.error. Indirectamente puede consolidar estado/posición
+        en cada eje.
+    Bloqueante:
+        Sí. Contiene un bucle con time.sleep_ms(1).
+    Dependencias:
+        _axis_state(), _axis_done(), axis.wait_until_done(), time.sleep_ms().
+    Posibles errores:
+        Eje en ERROR, eje en STOPPED. En CPython estándar time.sleep_ms no existe;
+        este archivo está orientado a MicroPython.
+
+10.15 home_all(self, sequence=None)
+    Clase:
+        MotionController
+    Propósito:
+        Ejecutar HOME de los ejes de forma secuencial.
+    Entradas:
+        sequence: iterable opcional de nombres de eje.
+    Salida:
+        bool.
+    Efectos internos:
+        Limpia error, cambia state a HOMING, llama home() eje por eje, vuelve a
+        IDLE si todo termina bien.
+    Modifica:
+        self.state, self.error. Indirectamente modifica referencia y posición de
+        cada eje.
+    Bloqueante:
+        Sí, porque home() de cada eje normalmente bloquea hasta finalizar.
+    Dependencias:
+        get_axis(), axis.home(), _set_error(), _clear_error().
+    Posibles errores:
+        Eje no registrado en la secuencia, eje sin home(), falla de HOME.
+
+10.16 stop_all(self)
+    Clase:
+        MotionController
+    Propósito:
+        Detener todos los ejes registrados.
+    Entradas:
+        Ninguna.
+    Salida:
+        True.
+    Efectos internos:
+        Llama stop() en cada eje, cambia state a STOPPED y registra mensaje de
+        error indicando que se requiere HOME nuevamente.
+    Modifica:
+        self.state, self.error y estado interno de los ejes.
+    Bloqueante:
+        Normalmente no, depende de axis.stop().
+    Dependencias:
+        axis.stop().
+    Posibles errores:
+        Si un eje registrado no implementa stop(), se producirá excepción porque
+        no se usa hasattr() en este método.
+
+10.17 enable_all(self)
+    Clase:
+        MotionController
+    Propósito:
+        Habilitar todos los drivers usando cada objeto de eje.
+    Entradas:
+        Ninguna.
+    Salida:
+        True.
+    Efectos internos:
+        Llama enable() en cada eje.
+    Modifica:
+        Estado de hardware del driver mediante el eje.
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        axis.enable().
+    Posibles errores:
+        Si un eje no implementa enable(), se producirá excepción.
+
+10.18 disable_all(self)
+    Clase:
+        MotionController
+    Propósito:
+        Deshabilitar todos los drivers usando cada objeto de eje.
+    Entradas:
+        Ninguna.
+    Salida:
+        True.
+    Efectos internos:
+        Llama disable() en cada eje.
+    Modifica:
+        Estado de hardware del driver mediante el eje.
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        axis.disable().
+    Posibles errores:
+        Si un eje no implementa disable(), se producirá excepción.
+
+10.19 set_axis_speed(self, axis_name, speed_mm_s)
+    Clase:
+        MotionController
+    Propósito:
+        Cambiar la velocidad fija de un eje registrado.
+    Entradas:
+        axis_name: nombre de eje.
+        speed_mm_s: velocidad en mm/s.
+    Salida:
+        bool.
+    Efectos internos:
+        Llama axis.set_speed_mm_s(). Puede registrar error global si falla.
+    Modifica:
+        Configuración de velocidad del eje.
+    Bloqueante:
+        No debería ser bloqueante.
+    Dependencias:
+        get_axis(), axis.set_speed_mm_s().
+    Posibles errores:
+        Eje no registrado, velocidad inválida o rechazo por parte del eje.
+
+10.20 set_all_speeds(self, speed_mm_s)
+    Clase:
+        MotionController
+    Propósito:
+        Aplicar la misma velocidad fija a todos los ejes registrados.
+    Entradas:
+        speed_mm_s: número en mm/s.
+    Salida:
+        bool.
+    Efectos internos:
+        Llama set_axis_speed() para cada eje.
+    Modifica:
+        Configuración de velocidad de todos los ejes.
+    Bloqueante:
+        No debería ser bloqueante.
+    Dependencias:
+        set_axis_speed().
+    Posibles errores:
+        Falla en el primer eje que rechace la velocidad.
+
+10.21 get_position(self)
+    Clase:
+        MotionController
+    Propósito:
+        Obtener posiciones actuales de todos los ejes.
+    Entradas:
+        Ninguna.
+    Salida:
+        dict de posiciones en mm.
+    Efectos internos:
+        Llama get_position() en cada eje.
+    Modifica:
+        No modifica estado del controlador.
+    Bloqueante:
+        No debería ser bloqueante.
+    Dependencias:
+        axis.get_position().
+    Posibles errores:
+        Si un eje no implementa get_position(), se producirá excepción.
+
+10.22 all_homed(self)
+    Clase:
+        MotionController
+    Propósito:
+        Verificar si todos los ejes registrados tienen HOME.
+    Entradas:
+        Ninguna.
+    Salida:
+        bool.
+    Efectos internos:
+        Consulta _axis_is_homed() por cada eje.
+    Modifica:
+        No modifica estado.
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        _axis_is_homed().
+    Posibles errores:
+        Si un método de estado del eje falla, no se captura excepción.
+
+10.23 is_busy(self)
+    Clase:
+        MotionController
+    Propósito:
+        Determinar si el controlador o algún eje está ocupado.
+    Entradas:
+        Ninguna.
+    Salida:
+        bool.
+    Efectos internos:
+        Lee self.state y consulta ejes.
+    Modifica:
+        No modifica estado.
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        _axis_is_busy().
+    Posibles errores:
+        Si axis.is_busy() falla, no se captura excepción.
+
+10.24 get_status(self)
+    Clase:
+        MotionController
+    Propósito:
+        Construir un resumen completo del controlador y de cada eje.
+    Entradas:
+        Ninguna.
+    Salida:
+        dict con estado global, error, HOME global, posiciones y estados de eje.
+    Efectos internos:
+        Llama all_homed(), get_position(), axis.get_status() o _axis_state().
+    Modifica:
+        No debería modificar estado.
+    Bloqueante:
+        Normalmente no.
+    Dependencias:
+        all_homed(), get_position(), axis.get_status(), _axis_state().
+    Posibles errores:
+        Si algún eje no implementa get_position(), get_status() puede fallar por
+        dependencia indirecta de get_position().
+
+================================================================================
+11. EXPLICACIÓN DEL FLUJO INTERNO
+================================================================================
+
+11.1 Inicialización
+
+    1) Se crea una instancia de MotionController.
+    2) El constructor inicializa:
+        self.axes = {}
+        self.state = STATE_IDLE
+        self.error = None
+    3) Si se entrega un diccionario axes, el constructor recorre sus claves y
+       llama add_axis() para registrar cada eje.
+
+11.2 Registro de ejes
+
+    1) add_axis(axis_name, axis_object) recibe un nombre y un objeto.
+    2) _normalize_axis_name() convierte el nombre a mayúsculas.
+    3) El eje se almacena en self.axes.
+    4) Si ya existía un eje con el mismo nombre, se reemplaza.
+
+11.3 Validación de ejes en un movimiento absoluto
+
+    1) move_to(targets, wait) verifica que targets no sea None.
+    2) Recorre cada eje solicitado.
+    3) Normaliza el nombre.
+    4) Busca el eje con get_axis().
+    5) Si no existe, llama _set_error() y retorna False.
+    6) Construye normalized_targets con los nombres normalizados.
+
+11.4 Verificación de ejes ocupados
+
+    Antes de iniciar cualquier movimiento nuevo, move_to() revisa todos los ejes
+    registrados, no solo los ejes solicitados. Si cualquier eje está ocupado,
+    devuelve error. Esto evita mezclar trayectorias nuevas con movimientos
+    incompletos.
+
+11.5 Verificación de HOME
+
+    El controlador exige HOME solo para los ejes pedidos en el movimiento. Si se
+    solicita mover X y Y, ambos deben estar referenciados. Si Z está registrado
+    pero no participa en ese movimiento, no bloquea esta validación.
+
+11.6 Validación de límites
+
+    Para cada eje solicitado, el controlador llama validate_target(target_mm). Si
+    no existe, intenta _validate_target(target_mm) por compatibilidad. Si el eje
+    rechaza el destino, el controlador copia axis.error cuando está disponible.
+
+11.7 Inicio de movimiento paralelo básico
+
+    1) Se limpia el error global.
+    2) self.state pasa a MOVING.
+    3) Se recorre cada objetivo normalizado.
+    4) Se llama axis.start_move_to_mm(target_mm).
+    5) Cada eje arranca su propia ejecución no bloqueante.
+    6) Los ejes se agregan a started_axes.
+    7) Si un eje falla al arrancar, el controlador detiene los ejes que ya habían
+       arrancado y retorna False.
+
+    Importante:
+        El arranque se considera paralelo en sentido lógico, porque no se llama a
+        move_to_mm() bloqueante eje por eje. Sin embargo, no hay cálculo de
+        sincronización de velocidades ni de tiempo común.
+
+11.8 Espera de finalización
+
+    Si wait=True, move_to() llama wait_until_done(). Este método:
+        1) Cambia state a MOVING.
+        2) Recorre todos los ejes registrados.
+        3) Si detecta ERROR o STOPPED, guarda error y retorna False.
+        4) Si detecta MOVING, revisa si el eje ya marcó done.
+        5) Si done=True y el eje tiene wait_until_done(), llama ese método para
+           consolidar estado y posición.
+        6) Si todavía hay ejes ocupados, espera 1 ms.
+        7) Cuando ninguno está ocupado, cambia state a IDLE, limpia error y
+           retorna True.
+
+11.9 Movimiento relativo
+
+    move_relative() no mueve por sí mismo. Primero calcula objetivos absolutos:
+        objetivo = posición_actual + distancia_relativa
+
+    Luego llama move_to(targets, wait). Por eso todas las validaciones de HOME,
+    límites, ocupación y arranque son las mismas que en movimiento absoluto.
+
+11.10 HOME general
+
+    home_all(sequence) ejecuta HOME de forma secuencial:
+        1) Si sequence es None, usa el orden de self.axes.
+        2) Limpia error.
+        3) Cambia state a HOMING.
+        4) Para cada eje de la secuencia, verifica que exista.
+        5) Verifica que tenga home().
+        6) Llama axis.home().
+        7) Si falla, registra error y retorna False.
+        8) Si todos terminan, state vuelve a IDLE y retorna True.
+
+11.11 Stop general
+
+    stop_all() llama stop() en todos los ejes, cambia el controlador a STOPPED y
+    guarda un mensaje indicando que se requiere HOME nuevamente. Esto es
+    importante porque un paro puede interrumpir pulsos y dejar la posición lógica
+    distinta de la posición física real.
+
+11.12 Habilitación y deshabilitación
+
+    enable_all() y disable_all() recorren self.axes y delegan la operación en
+    cada eje. El controlador no manipula pines ENABLE directamente.
+
+11.13 Manejo de errores
+
+    La mayoría de validaciones usan _set_error(), que guarda el texto del error,
+    cambia state a ERROR y retorna False. En operaciones que dependen del eje, se
+    intenta leer axis.error para dar un diagnóstico más específico.
+
+11.14 Perfil avanzado, tiempo mínimo y aceleración
+
+    Este archivo no calcula tiempo mínimo, perfil trapezoidal, segmentos de
+    aceleración, velocidad constante sincronizada ni desaceleración. Si se
+    requiere ese comportamiento, debe usarse un controlador avanzado del proyecto
+    o ampliar esta clase.
+
+================================================================================
+12. DIAGRAMA ASCII DE RELACIÓN ENTRE CLASES
+================================================================================
+
+No hay herencia en este archivo. La relación principal es composición:
+
+    +-------------------------+
+    |   MotionController      |
+    |-------------------------|
+    | axes: dict              |
+    | state: str              |
+    | error: str/None         |
+    +------------+------------+
+                 |
+                 | contiene referencias por nombre
+                 v
+        +--------+--------+----------------+
+        |                 |                |
+        v                 v                v
+    +---------+       +---------+      +---------+
+    | Eje X   |       | Eje Y   |      | Eje Z   |
+    | AxisObj |       | AxisObj |      | AxisObj |
+    +---------+       +---------+      +---------+
+        |                 |                |
+        v                 v                v
+    STEP/DIR/ENABLE   STEP/DIR/ENABLE  STEP/DIR/ENABLE
+    PIO propio        PIO propio       PIO propio
+    Sensor HOME       Sensor HOME      Sensor HOME
+
+Interpretación:
+    MotionController no es padre de los ejes. Solo guarda referencias y llama
+    métodos de cada eje. Los ejes son responsables de hardware, límites, HOME,
+    generación de pulsos y posición física.
+
+================================================================================
+13. DIAGRAMA ASCII DE LLAMADAS ENTRE FUNCIONES
+================================================================================
+
+13.1 Construcción y registro
+
+    __init__(axes)
+    |
+    +--> add_axis(axis_name, axis_object)
+         |
+         +--> _normalize_axis_name(axis_name)
+
+13.2 Movimiento absoluto
+
+    move_to(targets, wait)
+    |
+    +--> _normalize_axis_name(axis_name)
+    +--> get_axis(name)
+    |    |
+    |    +--> _normalize_axis_name(axis_name)
+    |
+    +--> _axis_is_busy(axis)
+    |    |
+    |    +--> axis.is_busy() si existe
+    |    +--> _axis_state(axis) si no existe is_busy()
+    |
+    +--> _axis_is_homed(axis)
+    |    |
+    |    +--> axis.is_homed() si existe
+    |    +--> axis.is_homed_flag si existe
+    |    +--> axis.get_status() si existe
+    |
+    +--> _validate_axis_target(axis, target_mm)
+    |    |
+    |    +--> axis.validate_target(target_mm)
+    |    +--> axis._validate_target(target_mm)
+    |
+    +--> _clear_error()
+    +--> axis.start_move_to_mm(target_mm)
+    |
+    +--> si falla un arranque:
+    |       +--> started_axis.stop()
+    |
+    +--> si wait=True:
+            +--> wait_until_done()
+
+13.3 Movimiento relativo
+
+    move_relative(distances, wait)
+    |
+    +--> _normalize_axis_name(axis_name)
+    +--> get_axis(name)
+    +--> axis.get_position()
+    +--> calcula target = position + distance
+    +--> move_to(targets, wait)
+
+13.4 Espera de finalización
+
+    wait_until_done()
+    |
+    +--> _axis_state(axis)
+    +--> si estado ERROR o STOPPED: retorna False
+    +--> si estado MOVING:
+    |       |
+    |       +--> _axis_done(axis)
+    |       +--> axis.wait_until_done() si done=True y existe
+    |
+    +--> si algún eje sigue ocupado:
+    |       +--> time.sleep_ms(1)
+    |       +--> repetir bucle
+    |
+    +--> si ninguno está ocupado:
+            +--> _clear_error()
+            +--> retorna True
+
+13.5 HOME general
+
+    home_all(sequence)
+    |
+    +--> _clear_error()
+    +--> _normalize_axis_name(axis_name)
+    +--> get_axis(name)
+    +--> axis.home()
+    +--> _set_error(message) si falla
+
+13.6 Estado global
+
+    get_status()
+    |
+    +--> all_homed()
+    |    |
+    |    +--> _axis_is_homed(axis)
+    |
+    +--> get_position()
+    |    |
+    |    +--> axis.get_position()
+    |
+    +--> axis.get_status() o _axis_state(axis)
+
+================================================================================
+14. DIAGRAMA ASCII DEL FLUJO DE OPERACIÓN
+================================================================================
+
+Flujo normal recomendado:
+
+    Inicio
+      |
+      v
+    Crear objetos de eje X/Y/Z
+      |
+      v
+    Crear MotionController
+      |
+      v
+    Registrar ejes con add_axis() o constructor
+      |
+      v
+    Revisar conexiones, límites y sensores HOME
+      |
+      v
+    enable_all()
+      |
+      v
+    home_all(["Z", "X", "Y"] o secuencia adecuada)
+      |
+      v
+    all_homed() == True ?
+      |
+      +------ No ------> Revisar error con get_status() y corregir
+      |
+      Sí
+      |
+      v
+    set_axis_speed() o set_all_speeds()
+      |
+      v
+    move_to({"X": objetivo_x, "Y": objetivo_y, "Z": objetivo_z})
+      |
+      v
+    wait_until_done() si el movimiento fue wait=False
+      |
+      v
+    get_position() / get_status()
+      |
+      v
+    ¿Nuevo movimiento?
+      |
+      +------ Sí ------> move_to() o move_relative()
+      |
+      No
+      |
+      v
+    disable_all()
+      |
+      v
+    Fin
+
+Flujo de emergencia:
+
+    Movimiento en ejecución
+      |
+      v
+    Condición insegura detectada
+      |
+      v
+    stop_all()
+      |
+      v
+    state = STOPPED
+      |
+      v
+    Corregir causa física o lógica
+      |
+      v
+    Ejecutar HOME nuevamente antes de confiar en la posición
+
+================================================================================
+15. EXPLICACIÓN DE MOVIMIENTO ABSOLUTO Y RELATIVO
+================================================================================
+
+15.1 Movimiento absoluto
+
+    Un movimiento absoluto interpreta el valor como una coordenada final dentro
+    del sistema de referencia de la máquina. La posición objetivo no depende del
+    desplazamiento anterior, sino del origen definido por HOME.
+
+    Ejemplo numérico:
+        Posición actual de X: 0 mm
+        move_to({"X": 150})
+        Resultado esperado: X termina en 150 mm.
+
+        Luego:
+        move_to({"X": 70})
+        Resultado esperado: X regresa desde 150 mm hasta 70 mm.
+
+    Interpretación:
+        move_to({"X": 70}) no suma 70 mm. Ordena ir a la coordenada absoluta
+        X=70 mm.
+
+15.2 Movimiento relativo
+
+    Un movimiento relativo interpreta el valor como una distancia que se suma o
+    resta a la posición actual.
+
+    Ejemplo numérico:
+        Posición actual de X: 150 mm
+        move_relative({"X": 70})
+        Objetivo calculado internamente: 150 + 70 = 220 mm
+        Resultado esperado: X termina en 220 mm.
+
+        Luego:
+        move_relative({"X": -20})
+        Objetivo calculado internamente: 220 - 20 = 200 mm
+        Resultado esperado: X termina en 200 mm.
+
+15.3 Diferencia clave
+
+    Movimiento absoluto:
+        "Ir a la coordenada indicada".
+
+    Movimiento relativo:
+        "Avanzar o retroceder desde la posición actual".
+
+15.4 Validación en ambos casos
+
+    Aunque move_relative() recibe distancias, el controlador las convierte a
+    objetivos absolutos y luego usa move_to(). Por eso los límites se validan
+    sobre la posición final calculada.
+
+================================================================================
+16. MANEJO DE ERRORES
+================================================================================
+
+16.1 Eje sin HOME
+
+    Causa:
+        Se intenta mover un eje que no ha sido referenciado.
+    Detección:
+        move_to() devuelve False y self.error indica "El eje X requiere HOME".
+    Corrección:
+        Ejecutar home_all() o axis.home() antes de mover. Verificar sensor HOME.
+
+16.2 Objetivo fuera de límite
+
+    Causa:
+        El valor de destino está fuera del rango permitido por el eje.
+    Detección:
+        move_to() devuelve False. El error puede decir "Objetivo invalido en eje
+        X" y puede incluir axis.error si el eje lo proporciona.
+    Corrección:
+        Revisar min/max del eje, pasos por milímetro, dimensiones reales de la
+        máquina y signo de dirección.
+
+16.3 Eje ocupado
+
+    Causa:
+        Se intenta iniciar un nuevo movimiento mientras cualquier eje registrado
+        sigue en MOVING o HOMING.
+    Detección:
+        move_to() devuelve False y self.error indica "El eje X esta ocupado".
+    Corrección:
+        Esperar wait_until_done(), usar movimientos con wait=True durante pruebas
+        o revisar si un eje quedó bloqueado en estado MOVING.
+
+16.4 Eje no registrado
+
+    Causa:
+        El diccionario targets, distances o sequence contiene un nombre que no
+        existe en self.axes.
+    Detección:
+        Mensajes como "Eje no registrado: X" o "Eje no registrado en secuencia
+        HOME: X".
+    Corrección:
+        Usar add_axis() antes de mover o corregir el nombre del eje.
+
+16.5 Falla de sensor HOME
+
+    Causa:
+        El eje no logra completar home(), el sensor no cambia de estado, está mal
+        cableado, trabaja invertido o el sentido de búsqueda es incorrecto.
+    Detección:
+        home_all() devuelve False y self.error indica "Fallo HOME en eje X" con
+        posible detalle de axis.error.
+    Corrección:
+        Verificar cableado, pull-up/pull-down, lógica invertida del sensor,
+        distancia máxima de búsqueda y sentido del motor.
+
+16.6 Parámetros inválidos
+
+    Causa:
+        targets o distances es None, una distancia no puede convertirse a float,
+        o speed_mm_s no es aceptada por el eje.
+    Detección:
+        Error global o excepción según el caso.
+    Corrección:
+        Validar tipos antes de llamar el controlador. Usar números en mm y
+        diccionarios con nombres de ejes válidos.
+
+16.7 Movimiento detenido
+
+    Causa:
+        Se llamó stop_all() o un eje entró en STOPPED.
+    Detección:
+        state = STOPPED, get_status()["controller_state"] = "STOPPED" o
+        wait_until_done() devuelve False.
+    Corrección:
+        Revisar la causa del paro, despejar obstrucciones y repetir HOME antes
+        de continuar.
+
+16.8 Posición no confiable después de STOP
+
+    Causa:
+        Un paro puede cortar un movimiento sin saber cuántos pasos físicos se
+        completaron realmente.
+    Detección:
+        stop_all() registra el mensaje "Movimiento detenido; se requiere HOME
+        nuevamente en los ejes".
+    Corrección:
+        Ejecutar HOME nuevamente para recuperar referencia mecánica.
+
+16.9 Objeto de eje incompatible
+
+    Causa:
+        Se registró un objeto que no implementa métodos requeridos como stop(),
+        enable(), disable(), get_position() o start_move_to_mm().
+    Detección:
+        Algunos métodos generarán AttributeError porque no todos verifican
+        hasattr() antes de llamar.
+    Corrección:
+        Usar objetos de eje compatibles con la API esperada o agregar validación
+        de interfaz al registrar ejes.
+
+================================================================================
+17. RECOMENDACIONES DE USO
+================================================================================
+
+17.1 Orden recomendado de pruebas
+
+    1) Probar cada eje individualmente sin carga mecánica crítica.
+    2) Verificar señales STEP, DIR y ENABLE con motor desconectado o en baja
+       corriente si es posible.
+    3) Confirmar que enable() y disable() funcionan.
+    4) Confirmar sentido de giro con movimientos pequeños.
+    5) Confirmar sensor HOME leyendo su estado antes de mover.
+    6) Ejecutar HOME de un solo eje.
+    7) Ejecutar HOME de todos los ejes con home_all().
+    8) Probar move_to() con distancias cortas.
+    9) Probar move_relative() con desplazamientos positivos y negativos.
+   10) Aumentar velocidad gradualmente.
+
+17.2 Velocidades iniciales recomendadas
+
+    Para pruebas iniciales conservadoras:
+        - Ejes X/Y con correa: 10 a 40 mm/s.
+        - Eje Z con husillo: 1 a 5 mm/s.
+        - Movimientos de HOME: velocidades aún más bajas si el eje individual lo
+          permite.
+
+    En máquinas tipo Ender 3 V2 o similares, X/Y suelen tolerar velocidades más
+    altas que Z. Evite aplicar set_all_speeds() con un valor alto si Z está
+    incluido.
+
+17.3 Validaciones antes de conectar motores reales
+
+    - Confirmar que los pines configurados en cada eje coinciden con el cableado.
+    - Confirmar tensión y corriente del driver.
+    - Confirmar microsteps del driver.
+    - Confirmar que ENABLE no está invertido.
+    - Confirmar sensores HOME y finales de carrera.
+    - Confirmar que los límites en mm coinciden con la mecánica real.
+
+17.4 Si el motor gira al revés
+
+    Opciones:
+        - Cambiar la configuración de inversión de dirección en el eje, si existe.
+        - Cambiar el cableado de una bobina del motor siguiendo documentación del
+          driver.
+        - Ajustar la lógica DIR en el módulo de eje, no en MotionController.
+
+    Recomendación:
+        Corregirlo en el objeto de eje para que MotionController pueda seguir
+        usando coordenadas positivas coherentes.
+
+17.5 Si el sensor HOME trabaja invertido
+
+    Opciones:
+        - Ajustar pull-up/pull-down.
+        - Cambiar configuración de inversión del sensor en el eje, si existe.
+        - Corregir el cableado NO/NC del interruptor.
+
+    Recomendación:
+        Verificar el estado lógico del sensor antes de ejecutar HOME con motor.
+
+17.6 Ajuste de microsteps y steps_per_mm
+
+    MotionController no calcula steps_per_mm. Ese valor pertenece al eje. Para
+    ajustarlo:
+        1) Configurar microsteps físicos del driver.
+        2) Calcular pasos por vuelta del motor multiplicados por microsteps.
+        3) Dividir por avance mecánico por vuelta o por desplazamiento por vuelta
+           de polea/correa.
+        4) Probar un movimiento medido, por ejemplo 100 mm.
+        5) Corregir el factor si la distancia real no coincide.
+
+    Fórmula conceptual:
+        steps_per_mm = pasos_motor_por_vuelta * microsteps / mm_por_vuelta
+
+17.7 Buenas prácticas de software
+
+    - Usar get_status() después de cualquier retorno False.
+    - Usar nombres de eje en mayúsculas para claridad, aunque el controlador los
+      normaliza.
+    - No iniciar movimientos nuevos con wait=False sin consultar is_busy().
+    - Mantener separados límites de software y HOME físico.
+    - Hacer HOME después de cualquier paro, salto de pasos o pérdida de energía.
+
+================================================================================
+18. LIMITACIONES DEL MÓDULO
+================================================================================
+
+    - No controla pines directamente.
+    - No genera pulsos STEP directamente.
+    - No configura PIO ni StateMachine.
+    - No implementa aceleración ni desaceleración.
+    - No implementa perfil trapezoidal.
+    - No calcula tiempo mínimo de movimiento.
+    - No sincroniza velocidades para que varios ejes lleguen exactamente al mismo
+      tiempo.
+    - No corrige pérdida de pasos.
+    - No usa encoder ni control closed-loop.
+    - No detecta obstrucciones mecánicas por sí mismo.
+    - Requiere drivers externos de motor a pasos.
+    - Requiere que los objetos de eje implementen la API esperada.
+    - Requiere HOME para que la posición sea confiable antes de mover.
+    - Después de STOP, la posición lógica puede no coincidir con la posición real.
+    - No valida en add_axis() que el objeto tenga todos los métodos necesarios.
+    - wait_until_done() usa time.sleep_ms(), que es propio de MicroPython; en
+      CPython estándar se necesitaría una función de compatibilidad.
+
+================================================================================
+19. EJEMPLO CONCEPTUAL DE USO
+================================================================================
+
+El siguiente ejemplo es conceptual. Los constructores reales de los ejes dependen
+del módulo de eje usado en el proyecto.
+
+    # Crear ejes individuales en otro módulo o archivo principal.
+    eje_x = BeltStepperAxis(...)
+    eje_y = BeltStepperAxis(...)
+    eje_z = ScrewStepperAxis(...)
+
+    # Crear controlador con los ejes.
+    motion = MotionController({
+        "X": eje_x,
+        "Y": eje_y,
+        "Z": eje_z,
+    })
+
+    # Habilitar drivers.
+    motion.enable_all()
+
+    # Ejecutar HOME. La secuencia puede ajustarse según la máquina.
+    if not motion.home_all(["Z", "X", "Y"]):
+        print(motion.get_status())
+
+    # Mover a una coordenada absoluta.
+    if motion.move_to({"X": 100, "Y": 50, "Z": 10}, wait=True):
+        print("Posición:", motion.get_position())
+    else:
+        print("Error:", motion.get_status())
+
+    # Mover de forma relativa.
+    motion.move_relative({"X": 10, "Y": -5}, wait=True)
+
+    # Deshabilitar al finalizar si la mecánica lo permite.
+    motion.disable_all()
+
+Interpretación del ejemplo:
+    - Los ejes hacen HOME antes de moverse.
+    - move_to() usa coordenadas absolutas.
+    - move_relative() suma desplazamientos a la posición actual.
+    - get_status() permite diagnosticar fallos.
+
+================================================================================
+20. CONCLUSIÓN
+================================================================================
+
+objMotionControler.py implementa un controlador básico de movimiento para
+coordinar varios ejes de una máquina cartesiana X/Y/Z. Su clase MotionController
+actúa como capa de administración: registra ejes, valida condiciones previas,
+ordena HOME, inicia movimientos, espera finalización, detiene el sistema,
+habilita/deshabilita drivers y consolida el estado global.
+
+Dentro del sistema completo con Raspberry Pi Pico/RP2040 y MicroPython, este
+archivo se ubica por encima de los controladores de eje individuales. No maneja
+pines, no genera pulsos y no usa PIO directamente. En cambio, delega esas tareas
+a los objetos de eje, los cuales pueden usar PIO y StateMachine para generar
+señales STEP precisas hacia drivers externos.
+
+Su papel es especialmente útil cuando la aplicación necesita trabajar con
+coordenadas cartesianas y no con motores aislados. Para movimientos básicos y
+operaciones de HOME/STOP/estado, ofrece una interfaz sencilla. Para trayectorias
+que requieran sincronización temporal, aceleración o perfiles trapezoidales, se
+recomienda usar o desarrollar un controlador avanzado.
+
+================================================================================
+OBSERVACIONES Y MEJORAS RECOMENDADAS
+================================================================================
+
+1) Nombre del archivo
+    El archivo se llama objMotionControler.py con una sola letra "l" en
+    "Controler". En inglés técnico lo usual sería "Controller". Cambiar el
+    nombre podría mejorar claridad, aunque requeriría actualizar imports.
+
+2) Compatibilidad con CPython
+    wait_until_done() usa time.sleep_ms(1). Esto es correcto en MicroPython, pero
+    no existe en CPython estándar. Si se desea probar el módulo en PC, conviene
+    agregar una función auxiliar compatible:
+        sleep_ms(ms) -> time.sleep_ms(ms) si existe, o time.sleep(ms / 1000.0).
+
+3) Validación de interfaz al registrar ejes
+    add_axis() acepta cualquier objeto sin comprobar métodos mínimos. Sería útil
+    validar que el eje implemente los métodos requeridos o documentar una
+    interfaz formal.
+
+4) Manejo defensivo de enable_all(), disable_all(), stop_all() y get_position()
+    Estos métodos llaman directamente enable(), disable(), stop() y
+    get_position(). Si un eje no los implementa, se producirá AttributeError. Se
+    podría usar hasattr() y _set_error() para mantener errores controlados.
+
+5) Sincronización temporal
+    move_to() arranca los ejes de forma no bloqueante, pero cada eje conserva su
+    propia velocidad. Si X debe recorrer 200 mm e Y solo 20 mm, probablemente no
+    terminarán al mismo tiempo. Para trayectorias coordinadas se recomienda una
+    versión avanzada con cálculo de tiempo común.
+
+6) Estado después de move_to(wait=False)
+    Si se usa wait=False, el controlador queda en MOVING. El usuario debe llamar
+    wait_until_done() o consultar is_busy(). Conviene documentarlo claramente en
+    ejemplos de aplicación.
+
+7) Recuperación después de error
+    _clear_error() se llama antes de movimientos y al terminar correctamente.
+    Podría agregarse un método público clear_error() o reset_error() para que la
+    aplicación limpie errores de manera explícita cuando sea seguro hacerlo.
+
+8) Orden de HOME por defecto
+    Si sequence=None, home_all() usa el orden del diccionario self.axes. En
+    MicroPython moderno suele conservar inserción, pero para máquinas reales es
+    más seguro entregar una secuencia explícita, por ejemplo ["Z", "X", "Y"],
+    según la mecánica.
+
+9) Ausencia de try/except en llamadas a ejes
+    El módulo no captura excepciones lanzadas por métodos de eje. Esto simplifica
+    el código, pero una falla inesperada puede interrumpir el programa principal.
+    En aplicaciones críticas puede convenir una política de manejo de errores
+    más robusta.
+
+10) Posición confiable
+    El controlador asume que el eje reporta posición correctamente. Si el motor
+    pierde pasos, no hay encoder ni corrección cerrada. La única forma de
+    recuperar referencia confiable es repetir HOME o usar sensores adicionales.
