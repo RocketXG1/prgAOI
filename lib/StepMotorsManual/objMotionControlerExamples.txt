@@ -1,0 +1,800 @@
+1. TÍTULO
+
+objMotionControler.py - Archivo de ejemplos de instanciación y uso
+
+Este documento contiene ejemplos prácticos para instanciar y usar el controlador de movimiento definido en objMotionControler.py.
+
+
+2. INTRODUCCIÓN
+
+Este archivo explica, con ejemplos prácticos, cómo crear y usar los objetos, clases y métodos principales del módulo objMotionControler.py.
+
+El módulo analizado contiene un controlador de movimiento llamado MotionController. Este controlador no genera pulsos STEP directamente, no configura pines de la Raspberry Pi Pico, no crea máquinas de estado PIO y no calcula la mecánica de cada eje. Su función es coordinar objetos de eje ya existentes para lanzar movimientos absolutos o relativos en uno o varios ejes.
+
+Los ejemplos sirven para aprender a usar la clase MotionController junto con clases externas de eje del proyecto, por ejemplo BeltStepperAxis y ScrewStepperAxis del archivo objStepperAxis.py.
+
+Todos los valores de pines, velocidades, límites, pasos por revolución, microsteps, poleas, banda, tornillo, sensores HOME y señales invertidas deben ajustarse al hardware real antes de probar en una máquina física.
+
+Los ejemplos están orientados a Raspberry Pi Pico / RP2040 con MicroPython y a un sistema XYZ con motores a pasos, drivers externos STEP/DIR/ENABLE y sensores HOME.
+
+
+3. REQUISITOS PREVIOS
+
+Módulos que deben existir en la Raspberry Pi Pico o en el proyecto:
+
+- objMotionControler.py
+  Contiene MotionController y las constantes de estado STATE_IDLE, STATE_MOVING, STATE_HOMING, STATE_ERROR y STATE_STOPPED.
+
+- objStepperAxis.py
+  Debe existir si se usarán los ejemplos completos con ejes reales. Este archivo debe aportar clases de eje compatibles, por ejemplo BeltStepperAxis y ScrewStepperAxis.
+
+- machine
+  Módulo propio de MicroPython usado por los ejes para controlar pines.
+
+- rp2
+  Módulo propio de MicroPython usado por los ejes para generar pulsos STEP mediante PIO en Raspberry Pi Pico / RP2040.
+
+- time
+  Usado por objMotionControler.py y por los ejes para pausas de espera.
+
+Requisitos de hardware:
+
+- Se requiere una Raspberry Pi Pico o una placa compatible con RP2040 si se usarán ejes reales basados en PIO.
+- Se requieren drivers externos para motor a pasos con entradas STEP, DIR y, si aplica, ENABLE.
+- Se requieren motores a pasos conectados a los drivers externos, nunca conectados directamente a la Pico.
+- Se recomiendan sensores HOME para cada eje usado en operación real.
+- El archivo objMotionControler.py debe haberse cargado previamente en la Pico.
+- Para ejecutar los ejemplos que instancian ejes, también debe haberse cargado objStepperAxis.py.
+- Este controlador depende de otros módulos del proyecto porque no contiene las clases de eje. Cada eje debe implementar la API esperada por MotionController: get_position(), is_homed() o is_homed_flag, is_busy(), validate_target() o _validate_target(), start_move_to_mm(), wait_until_done(), stop(), home(), enable(), disable(), set_speed_mm_s() y get_status().
+
+
+4. CLASES DISPONIBLES EN EL ARCHIVO
+
+Clase encontrada en objMotionControler.py:
+
+- MotionController
+
+  Propósito:
+  Coordinar movimientos simples en paralelo entre varios ejes ya creados. El controlador recibe un diccionario de ejes, valida que existan, verifica que no estén ocupados, confirma que tengan HOME cuando se solicita movimiento, valida destinos y ordena a cada eje iniciar su movimiento no bloqueante con start_move_to_mm().
+
+  Cuándo conviene usarla:
+  Conviene usarla cuando se tiene una máquina con varios ejes, por ejemplo X, Y y Z, y se desea mover uno o más ejes desde un punto central del programa. También conviene cuando se necesita ejecutar HOME secuencial, habilitar o deshabilitar todos los drivers, detener todo el sistema o consultar posiciones y estados globales.
+
+  Parámetros principales del constructor:
+  - axes: diccionario opcional de ejes ya instanciados. Ejemplo: {"X": eje_x, "Y": eje_y, "Z": eje_z}. Si no se entrega, el controlador se crea vacío y luego se agregan ejes con add_axis().
+
+  Métodos principales que se usarán en los ejemplos:
+  - add_axis(axis_name, axis_object): agrega o reemplaza un eje en el controlador.
+  - get_axis(axis_name): obtiene un eje registrado por nombre.
+  - move_to(targets, wait): ejecuta movimiento absoluto para uno o varios ejes.
+  - move_relative(distances, wait): convierte desplazamientos relativos en destinos absolutos y ejecuta movimiento.
+  - wait_until_done(): espera hasta que todos los ejes registrados terminen.
+  - home_all(sequence): ejecuta HOME secuencial en todos los ejes o en el orden indicado.
+  - stop_all(): detiene todos los ejes registrados.
+  - enable_all(): habilita todos los drivers llamando enable() en cada eje.
+  - disable_all(): deshabilita todos los drivers llamando disable() en cada eje.
+  - set_axis_speed(axis_name, speed_mm_s): cambia la velocidad de un eje registrado.
+  - set_all_speeds(speed_mm_s): cambia la velocidad de todos los ejes registrados.
+  - get_position(): devuelve posiciones actuales de todos los ejes en milímetros.
+  - all_homed(): devuelve True si todos los ejes registrados tienen HOME válido.
+  - is_busy(): indica si el controlador o algún eje está ocupado.
+  - get_status(): devuelve estado completo del controlador y de los ejes.
+
+Constantes públicas disponibles en el archivo:
+
+- STATE_IDLE: controlador libre.
+- STATE_MOVING: controlador ejecutando movimiento.
+- STATE_HOMING: controlador ejecutando HOME.
+- STATE_ERROR: controlador en error.
+- STATE_STOPPED: controlador detenido por paro.
+
+Nota importante:
+objMotionControler.py no contiene clases de eje. Por eso los ejemplos que crean X, Y y Z usan clases externas representativas del proyecto, como BeltStepperAxis y ScrewStepperAxis, que deben existir en objStepperAxis.py.
+
+
+5. VARIABLES Y PARÁMETROS USADOS EN LOS EJEMPLOS
+
+Parámetros propios de MotionController:
+
+- axes
+  Descripción: diccionario opcional con ejes ya instanciados.
+  Ejemplo típico: {"X": eje_x, "Y": eje_y, "Z": eje_z}
+  Aplica al archivo analizado: sí.
+
+- axis_name
+  Descripción: nombre lógico del eje dentro del controlador. El controlador lo convierte a mayúsculas.
+  Ejemplo típico: "X", "Y", "Z"
+  Aplica al archivo analizado: sí.
+
+- axis_object
+  Descripción: objeto de eje compatible con la API esperada por MotionController.
+  Ejemplo típico: eje_x creado con BeltStepperAxis.
+  Aplica al archivo analizado: sí.
+
+- targets
+  Descripción: diccionario de posiciones absolutas en milímetros para mover uno o varios ejes.
+  Ejemplo típico: {"X": 150.0, "Y": 70.0, "Z": 10.0}
+  Aplica al archivo analizado: sí.
+
+- distances
+  Descripción: diccionario de desplazamientos relativos en milímetros.
+  Ejemplo típico: {"X": 20.0, "Y": -5.0, "Z": 2.0}
+  Aplica al archivo analizado: sí.
+
+- wait
+  Descripción: si es True, move_to() o move_relative() esperan hasta terminar; si es False, arrancan el movimiento y el programa debe llamar wait_until_done() después.
+  Ejemplo típico: wait=True para pruebas simples; wait=False cuando se desea iniciar el movimiento y atender otras tareas antes de esperar.
+  Aplica al archivo analizado: sí.
+
+- sequence
+  Descripción: orden opcional para ejecutar HOME en home_all().
+  Ejemplo típico: ["Z", "X", "Y"]
+  Aplica al archivo analizado: sí.
+
+- speed_mm_s
+  Descripción: velocidad fija en milímetros por segundo que se cambia mediante set_axis_speed() o set_all_speeds().
+  Ejemplo típico: 5.0 para pruebas lentas, 20.0 para movimientos normales.
+  Aplica al archivo analizado: sí, como argumento de métodos del controlador y como parámetro de ejes externos.
+
+Parámetros de ejes externos usados en los ejemplos porque el controlador necesita ejes ya creados:
+
+- name
+  Descripción: nombre interno del eje.
+  Ejemplo típico: "X", "Y", "Z"
+  Aplica al archivo analizado: indirectamente, porque pertenece al eje externo.
+
+- step_pin
+  Descripción: pin GPIO conectado a STEP o PUL del driver.
+  Ejemplo típico: 2 para X, 6 para Y, 10 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- dir_pin
+  Descripción: pin GPIO conectado a DIR del driver.
+  Ejemplo típico: 3 para X, 7 para Y, 11 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- enable_pin
+  Descripción: pin GPIO conectado a ENABLE del driver.
+  Ejemplo típico: 4 para X, 8 para Y, 12 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- sm_id
+  Descripción: número de StateMachine PIO usado por el eje. Cada eje debe usar un sm_id diferente.
+  Ejemplo típico: 0 para X, 1 para Y, 2 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- motor_steps_per_rev
+  Descripción: pasos completos del motor por revolución.
+  Ejemplo típico: 200 para motor de 1.8 grados.
+  Aplica al archivo analizado: indirectamente.
+
+- microsteps
+  Descripción: microstepping configurado físicamente en el driver y en el software.
+  Ejemplo típico: 8, 16 o 32.
+  Aplica al archivo analizado: indirectamente.
+
+- max_speed_mm_s
+  Descripción: velocidad máxima permitida por el eje.
+  Ejemplo típico: 50.0 o 100.0.
+  Aplica al archivo analizado: indirectamente.
+
+- pulley_teeth
+  Descripción: cantidad de dientes de la polea en un eje por banda.
+  Ejemplo típico: 20.
+  Aplica al archivo analizado: indirectamente.
+
+- belt_pitch_mm
+  Descripción: paso de la banda en milímetros por diente.
+  Ejemplo típico: 2.0 para GT2.
+  Aplica al archivo analizado: indirectamente.
+
+- screw_lead_mm
+  Descripción: avance lineal por vuelta del tornillo o husillo.
+  Ejemplo típico: 8.0 mm/vuelta.
+  Aplica al archivo analizado: indirectamente.
+
+- home_pin
+  Descripción: pin GPIO conectado al sensor HOME del eje.
+  Ejemplo típico: 5 para X, 9 para Y, 13 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- home_direction
+  Descripción: dirección de búsqueda de HOME; normalmente -1 hacia el origen o 1 hacia el extremo positivo.
+  Ejemplo típico: -1.
+  Aplica al archivo analizado: indirectamente.
+
+- home_speed_mm_s
+  Descripción: velocidad usada durante HOME.
+  Ejemplo típico: 3.0 a 8.0.
+  Aplica al archivo analizado: indirectamente.
+
+- home_backoff_mm
+  Descripción: distancia para retirar el eje del sensor HOME antes de una segunda aproximación.
+  Ejemplo típico: 2.0.
+  Aplica al archivo analizado: indirectamente.
+
+- min_position_mm
+  Descripción: límite mínimo permitido para el eje.
+  Ejemplo típico: 0.0.
+  Aplica al archivo analizado: indirectamente.
+
+- max_position_mm
+  Descripción: límite máximo permitido para el eje.
+  Ejemplo típico: 300.0 para X, 200.0 para Y, 80.0 para Z.
+  Aplica al archivo analizado: indirectamente.
+
+- invert_direction
+  Descripción: invierte la lógica del pin DIR cuando el movimiento físico queda al revés de lo esperado.
+  Ejemplo típico: False al inicio; True si el eje se mueve al lado contrario.
+  Aplica al archivo analizado: indirectamente.
+
+- enable_active_low
+  Descripción: indica si ENABLE se activa con nivel bajo.
+  Ejemplo típico: True para muchos drivers externos.
+  Aplica al archivo analizado: indirectamente.
+
+- home_active_low
+  Descripción: indica si el sensor HOME se considera activo cuando el pin lee 0.
+  Ejemplo típico: True con finales de carrera usando pull-up.
+  Aplica al archivo analizado: indirectamente.
+
+Parámetros de la lista solicitada que no aplican directamente a este archivo:
+
+- acceleration_mm_s2 y deceleration_mm_s2 no existen en objMotionControler.py. Este controlador simple no implementa perfil trapezoidal ni aceleración. Si se requieren aceleración y desaceleración, debe usarse un módulo avanzado del proyecto que sí las implemente.
+
+
+6. CONSIDERACIONES DE HARDWARE
+
+- Los pines usados en los ejemplos son solamente ejemplos. Deben cambiarse según el cableado real de la máquina.
+- Cada eje debe usar un sm_id diferente si usa PIO. No se debe repetir el mismo sm_id en X, Y y Z.
+- Los drivers de los motores deben compartir GND con la Raspberry Pi Pico.
+- La Raspberry Pi Pico no alimenta los motores. La Pico solo entrega señales lógicas STEP, DIR y ENABLE.
+- Los motores deben estar conectados a drivers externos adecuados para la corriente y tensión del motor.
+- Los sensores HOME deben probarse antes de mover cualquier eje. Verificar que el pin cambie de estado al activar el sensor.
+- Durante pruebas sin sensor HOME, se puede simular is_homed_flag = True solo en pruebas controladas, con el motor sin carga y con recorridos muy pequeños. No debe usarse esta simulación para operación real.
+- Antes de conectar mecánica pesada, probar primero con baja velocidad, movimientos cortos y posibilidad de cortar energía.
+- Si un eje se mueve en sentido contrario, no intercambiar cables del motor al azar durante la prueba energizada. Primero apagar el sistema y revisar si conviene usar invert_direction.
+
+
+7. EJEMPLO 1 - INSTANCIACIÓN MÍNIMA O BÁSICA
+
+Objetivo del ejemplo:
+Crear un eje X por banda usando una clase externa y pasarlo a MotionController. Como objMotionControler.py es un controlador y no contiene clases de eje, el eje X se crea con BeltStepperAxis de objStepperAxis.py.
+
+Valores que deben cambiarse según el hardware:
+- step_pin, dir_pin y enable_pin.
+- sm_id, verificando que no se repita con otro eje.
+- pulley_teeth y belt_pitch_mm según la polea y banda reales.
+- speed_mm_s y max_speed_mm_s según la mecánica.
+- min_position_mm y max_position_mm según el recorrido real.
+
+Explicación línea por línea:
+- Se importa MotionController desde objMotionControler.py.
+- Se importa BeltStepperAxis desde objStepperAxis.py.
+- Se crea eje_x con pines y parámetros mecánicos de ejemplo.
+- Se crea controller con un diccionario que registra el eje X.
+- Se simula is_homed_flag únicamente para una prueba controlada sin HOME real.
+- Se ejecuta move_to({"X": 20.0}) para ir a 20 mm absolutos.
+- Se imprime el estado completo del controlador.
+
+Código completo:
+
+from objMotionControler import MotionController
+from objStepperAxis import BeltStepperAxis
+
+# Eje X por banda GT2 con polea de 20 dientes.
+eje_x = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=10.0,
+    max_speed_mm_s=50.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+)
+
+# Crear el controlador con el eje ya instanciado.
+controller = MotionController({"X": eje_x})
+
+# Solo para prueba controlada sin sensor HOME.
+# En operación real, hacer HOME con controller.home_all().
+eje_x.is_homed_flag = True
+
+# Movimiento absoluto: ir a X = 20.0 mm.
+if controller.move_to({"X": 20.0}, wait=True):
+    print("Movimiento terminado")
+else:
+    print("Error:", controller.error)
+
+print(controller.get_status())
+
+
+8. EJEMPLO 2 - INSTANCIACIÓN CON PARÁMETROS DE HOME
+
+Objetivo del ejemplo:
+Crear un eje X con sensor HOME, dirección de búsqueda, velocidad de HOME y distancia de retirada o backoff. Después se registra el eje en MotionController y se ejecuta home_all().
+
+Cómo se comporta:
+- home_all(["X"]) llama al método home() del eje X.
+- El eje busca el sensor en home_direction.
+- Cuando detecta HOME, se retira home_backoff_mm.
+- Luego vuelve a aproximarse más lentamente.
+- Al finalizar, la posición lógica queda en 0.0 mm y el eje queda listo para moverse.
+
+Qué pasa si el sensor trabaja invertido:
+- Si el sensor está cableado como activo en bajo, usar home_active_low=True.
+- Si el sensor entrega 1 cuando está activo, usar home_active_low=False.
+- Si home_active_low está mal configurado, el eje puede creer que el sensor está activo todo el tiempo o no detectarlo nunca.
+
+Código completo:
+
+from objMotionControler import MotionController
+from objStepperAxis import BeltStepperAxis
+
+eje_x = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=10.0,
+    max_speed_mm_s=50.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+    home_active_low=True,
+)
+
+controller = MotionController({"X": eje_x})
+controller.enable_all()
+
+# Ejecutar HOME antes de cualquier movimiento real.
+if controller.home_all(["X"]):
+    print("HOME X terminado")
+else:
+    print("Error durante HOME:", controller.error)
+
+# Después de HOME, el movimiento absoluto ya es permitido.
+if controller.move_to({"X": 50.0}, wait=True):
+    print("X llegó a 50 mm")
+else:
+    print("Error de movimiento:", controller.error)
+
+print(controller.get_position())
+
+
+9. EJEMPLO 3 - INSTANCIACIÓN CON LÍMITES Y DIRECCIÓN INVERTIDA
+
+Objetivo del ejemplo:
+Crear un eje X con límites de recorrido y con invert_direction=True. Esto se usa cuando al pedir un movimiento positivo el eje se mueve físicamente hacia el lado negativo.
+
+Cuándo se usa invert_direction:
+- Usar invert_direction=False si el eje se mueve en la dirección esperada.
+- Usar invert_direction=True si el cableado, el driver o la mecánica hacen que el sentido del pin DIR quede invertido.
+- Cambiar este parámetro con el sistema apagado y probar con movimientos cortos.
+
+Qué ocurre si se pide un objetivo fuera de rango:
+- MotionController llama a la validación del eje antes de arrancar el movimiento.
+- Si el destino está fuera de min_position_mm y max_position_mm, move_to() devuelve False.
+- controller.error indica qué eje tuvo el objetivo inválido.
+- No se debe iniciar ningún eje si la validación falla.
+
+Código completo:
+
+from objMotionControler import MotionController
+from objStepperAxis import BeltStepperAxis
+
+eje_x = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=8.0,
+    max_speed_mm_s=40.0,
+    min_position_mm=0.0,
+    max_position_mm=250.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=4.0,
+    home_backoff_mm=2.0,
+    invert_direction=True,
+    enable_active_low=True,
+    home_active_low=True,
+)
+
+controller = MotionController()
+controller.add_axis("X", eje_x)
+
+if not controller.home_all(["X"]):
+    print("No se pudo hacer HOME:", controller.error)
+else:
+    # Movimiento válido dentro de 0 a 250 mm.
+    print("Mover a 120 mm:", controller.move_to({"X": 120.0}, wait=True))
+
+    # Movimiento inválido: 300 mm está fuera del límite máximo.
+    if not controller.move_to({"X": 300.0}, wait=True):
+        print("Movimiento rechazado por seguridad:", controller.error)
+
+print(controller.get_status())
+
+
+10. EJEMPLO 4 - USO CON VARIOS EJES
+
+Objetivo del ejemplo:
+Crear un sistema XYZ con dos ejes por banda, X e Y, y un eje por tornillo, Z. Después se pasan los tres ejes al controlador y se ejecutan movimientos absolutos.
+
+Aclaración sobre movimiento absoluto:
+- move_to({"X": 150.0}) significa ir a la coordenada absoluta X = 150.0 mm.
+- Si después se llama move_to({"X": 70.0}), el eje va a X = 70.0 mm absoluto.
+- No significa sumar 70.0 mm al movimiento anterior.
+- Para sumar o restar desde la posición actual, usar move_relative().
+
+Código completo:
+
+from objMotionControler import MotionController
+from objStepperAxis import BeltStepperAxis, ScrewStepperAxis
+
+eje_x = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=15.0,
+    max_speed_mm_s=60.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+)
+
+eje_y = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="Y",
+    step_pin=6,
+    dir_pin=7,
+    enable_pin=8,
+    sm_id=1,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=15.0,
+    max_speed_mm_s=60.0,
+    min_position_mm=0.0,
+    max_position_mm=220.0,
+    home_pin=9,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+)
+
+eje_z = ScrewStepperAxis(
+    screw_lead_mm=8.0,
+    name="Z",
+    step_pin=10,
+    dir_pin=11,
+    enable_pin=12,
+    sm_id=2,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=4.0,
+    max_speed_mm_s=20.0,
+    min_position_mm=0.0,
+    max_position_mm=80.0,
+    home_pin=13,
+    home_direction=-1,
+    home_speed_mm_s=2.0,
+    home_backoff_mm=1.0,
+)
+
+controller = MotionController({"X": eje_x, "Y": eje_y, "Z": eje_z})
+controller.enable_all()
+
+# HOME en orden seguro: primero Z para levantar herramienta, luego X e Y.
+if not controller.home_all(["Z", "X", "Y"]):
+    print("Error de HOME:", controller.error)
+else:
+    # Movimiento absoluto de varios ejes.
+    controller.move_to({"X": 150.0, "Y": 100.0, "Z": 20.0}, wait=True)
+
+    # Movimiento absoluto a otra coordenada.
+    # X = 70.0 significa ir a 70 mm absolutos, no sumar 70 mm.
+    controller.move_to({"X": 70.0, "Y": 40.0}, wait=True)
+
+print(controller.get_position())
+
+
+11. EJEMPLO 5 - USO AVANZADO O CASO COMPLETO
+
+Objetivo del ejemplo:
+Mostrar un flujo completo con home_all(), move_to(), move_relative(), wait_until_done(), get_status() y stop_all(). Este módulo es un MotionController simple: no implementa perfil trapezoidal, aceleración, desaceleración ni actualización sincronizada por update().
+
+Flujo completo:
+- Crear ejes X, Y y Z con clases externas compatibles.
+- Crear MotionController con los ejes ya instanciados.
+- Habilitar drivers.
+- Ejecutar HOME en un orden seguro.
+- Ajustar velocidades con set_axis_speed() y set_all_speeds().
+- Ejecutar movimiento absoluto con wait=False.
+- Esperar con wait_until_done().
+- Ejecutar movimiento relativo.
+- Consultar estado.
+- Detener todo con stop_all() ante una condición de seguridad.
+
+Código completo:
+
+from objMotionControler import MotionController
+from objStepperAxis import BeltStepperAxis, ScrewStepperAxis
+
+# Crear ejes externos compatibles con MotionController.
+eje_x = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="X",
+    step_pin=2,
+    dir_pin=3,
+    enable_pin=4,
+    sm_id=0,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=10.0,
+    max_speed_mm_s=60.0,
+    min_position_mm=0.0,
+    max_position_mm=300.0,
+    home_pin=5,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+)
+
+eje_y = BeltStepperAxis(
+    pulley_teeth=20,
+    belt_pitch_mm=2.0,
+    name="Y",
+    step_pin=6,
+    dir_pin=7,
+    enable_pin=8,
+    sm_id=1,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=10.0,
+    max_speed_mm_s=60.0,
+    min_position_mm=0.0,
+    max_position_mm=220.0,
+    home_pin=9,
+    home_direction=-1,
+    home_speed_mm_s=5.0,
+    home_backoff_mm=2.0,
+)
+
+eje_z = ScrewStepperAxis(
+    screw_lead_mm=8.0,
+    name="Z",
+    step_pin=10,
+    dir_pin=11,
+    enable_pin=12,
+    sm_id=2,
+    motor_steps_per_rev=200,
+    microsteps=16,
+    speed_mm_s=3.0,
+    max_speed_mm_s=20.0,
+    min_position_mm=0.0,
+    max_position_mm=80.0,
+    home_pin=13,
+    home_direction=-1,
+    home_speed_mm_s=2.0,
+    home_backoff_mm=1.0,
+)
+
+controller = MotionController()
+controller.add_axis("X", eje_x)
+controller.add_axis("Y", eje_y)
+controller.add_axis("Z", eje_z)
+
+controller.enable_all()
+
+if not controller.home_all(["Z", "X", "Y"]):
+    print("Fallo HOME:", controller.error)
+    controller.stop_all()
+else:
+    # Velocidad baja para primera prueba real.
+    controller.set_all_speeds(8.0)
+    controller.set_axis_speed("Z", 3.0)
+
+    # Movimiento absoluto no bloqueante.
+    if controller.move_to({"X": 100.0, "Y": 80.0, "Z": 15.0}, wait=False):
+        controller.wait_until_done()
+    else:
+        print("No se pudo iniciar movimiento:", controller.error)
+
+    # Movimiento relativo: sumar 10 mm en X, restar 5 mm en Y y subir 2 mm en Z.
+    if not controller.move_relative({"X": 10.0, "Y": -5.0, "Z": 2.0}, wait=True):
+        print("Error en movimiento relativo:", controller.error)
+
+    status = controller.get_status()
+    print("Estado final:", status)
+
+    # Ejemplo de paro general ante una condición externa.
+    emergencia = False
+    if emergencia:
+        controller.stop_all()
+        print("Sistema detenido:", controller.error)
+
+controller.disable_all()
+
+
+12. DIAGRAMA DE USO ENTRE OBJETOS
+
+Relación general cuando se usa objMotionControler.py con ejes externos:
+
++-------------------------+
+| MotionController        |
+| objMotionControler.py   |
++-------------------------+
+          |       |       |
+          v       v       v
+       Eje X   Eje Y   Eje Z
+          |       |       |
+          v       v       v
++----------------+ +----------------+ +----------------+
+| BeltStepperAxis| | BeltStepperAxis| | ScrewStepperAxis|
+| Banda / polea  | | Banda / polea  | | Tornillo/husillo|
++----------------+ +----------------+ +----------------+
+          |       |       |
+          v       v       v
+       Driver  Driver  Driver
+       STEP    STEP    STEP
+       DIR     DIR     DIR
+       ENABLE  ENABLE  ENABLE
+
+El controlador administra ejes ya creados. Los ejes son los responsables de pines, PIO, límites, HOME y conversión de milímetros a pasos.
+
+
+13. DIAGRAMA DE LLAMADAS TÍPICAS
+
+Flujo típico para usar el controlador:
+
+Crear ejes externos
+|
+v
+Crear MotionController
+|
+v
+add_axis() o constructor con diccionario
+|
+v
+enable_all()
+|
+v
+home_all()
+|
+v
+move_to()
+|
+v
+wait_until_done()
+|
+v
+move_relative()
+|
+v
+get_status()
+|
+v
+disable_all() o stop_all()
+
+Flujo típico interno de movimiento:
+
+move_to({"X": 150.0, "Y": 70.0})
+|
+v
+Normalizar nombres de ejes
+|
+v
+Verificar que existan
+|
+v
+Verificar que no estén ocupados
+|
+v
+Verificar HOME en ejes solicitados
+|
+v
+Validar límites de todos los objetivos
+|
+v
+Llamar start_move_to_mm() en cada eje
+|
+v
+wait_until_done() si wait=True
+
+
+14. EXPLICACIÓN DE LOS 5 EJEMPLOS
+
+- Ejemplo 1:
+  Usa MotionController con un solo eje X básico. Los parámetros principales son axes, name, step_pin, dir_pin, enable_pin, sm_id, motor_steps_per_rev, microsteps, speed_mm_s, max_speed_mm_s, pulley_teeth, belt_pitch_mm, min_position_mm y max_position_mm. Conviene usarlo como primera lectura para entender cómo se conecta un eje externo con el controlador.
+
+- Ejemplo 2:
+  Agrega parámetros de HOME: home_pin, home_direction, home_speed_mm_s, home_backoff_mm y home_active_low. Conviene usarlo cuando ya está cableado el sensor HOME y se quiere probar el ciclo de referencia antes de mover.
+
+- Ejemplo 3:
+  Agrega límites explícitos, invert_direction, enable_active_low y una prueba de destino fuera de rango. Conviene usarlo cuando se está calibrando el sentido físico del eje y se quiere confirmar que el controlador rechaza coordenadas inseguras.
+
+- Ejemplo 4:
+  Agrega varios ejes X, Y y Z. X e Y son ejemplos por banda/polea y Z es ejemplo por tornillo/husillo. También muestra movimientos absolutos y aclara que move_to(150), luego move_to(70), significa ir a 70 absoluto, no sumar 70.
+
+- Ejemplo 5:
+  Integra un caso más completo con home_all(), set_all_speeds(), set_axis_speed(), move_to() no bloqueante, wait_until_done(), move_relative(), get_status(), stop_all() y disable_all(). Conviene usarlo como base para un programa real, después de haber probado individualmente cada eje y sensor.
+
+
+15. ERRORES COMUNES AL INSTANCIAR
+
+- Repetir sm_id en dos ejes. Cada eje con PIO debe usar una StateMachine distinta.
+- Usar pines repetidos para STEP, DIR, ENABLE o HOME sin intención clara.
+- No compartir GND entre la Pico, los drivers y las fuentes de señal.
+- Intentar alimentar motores desde la Raspberry Pi Pico.
+- Configurar microsteps en software diferente a lo configurado físicamente en el driver.
+- No hacer HOME antes de mover. MotionController exige HOME en los ejes solicitados antes de move_to() o move_relative().
+- Poner límites incorrectos, por ejemplo max_position_mm mayor que el recorrido físico real.
+- Confundir movimiento absoluto con relativo. move_to() usa coordenadas absolutas; move_relative() suma o resta desde la posición actual.
+- Usar una velocidad demasiado alta para el motor, el driver, la fuente o la carga mecánica.
+- Invertir mal el sensor HOME con home_active_low incorrecto.
+- Configurar mal home_direction y hacer que el eje busque HOME alejándose del sensor.
+- No configurar correctamente polea, banda o tornillo, lo que produce pasos por milímetro incorrectos.
+- Crear el controlador sin registrar ejes y luego intentar mover ejes inexistentes.
+- Llamar move_to() mientras un eje todavía está ocupado.
+- Usar stop_all() y luego intentar mover sin volver a hacer HOME. Después de stop_all(), los ejes deben referenciarse nuevamente.
+
+
+16. CHECKLIST ANTES DE PROBAR EN HARDWARE REAL
+
+- Driver conectado correctamente.
+- Fuente del motor conectada al driver, no a la Pico.
+- GND común entre Pico, drivers y fuente de señales.
+- Pines STEP/DIR/ENABLE revisados contra el código.
+- Corriente del driver ajustada para el motor.
+- Motor sin carga o con carga mínima al inicio.
+- Velocidad baja para la primera prueba.
+- Microsteps configurados igual en driver y software.
+- Sensor HOME probado manualmente antes de mover.
+- home_active_low verificado con lectura real del pin.
+- home_direction revisado con un movimiento corto.
+- Límites min_position_mm y max_position_mm revisados.
+- Paro de emergencia disponible.
+- Movimiento corto de prueba preparado, por ejemplo 1 mm a 5 mm.
+- Operador listo para cortar energía si el eje se mueve en dirección incorrecta.
+
+
+17. CONCLUSIÓN
+
+Los ejemplos de este archivo muestran cómo usar objMotionControler.py como controlador central para ejes externos ya instanciados. MotionController no reemplaza a las clases de eje: las coordina, valida sus estados y llama sus métodos principales para HOME, movimiento, parada, habilitación, deshabilitación y consulta de estado.
+
+Se recomienda empezar con el ejemplo más básico de un solo eje, revisar que los pines y parámetros mecánicos sean correctos y luego avanzar gradualmente hacia HOME, límites, dirección invertida y uso con varios ejes.
+
+Antes de usar el caso completo, cada eje debe haber sido probado individualmente con baja velocidad, sensor HOME verificado, límites correctos y paro de emergencia disponible.
+
+Todos los valores deben calibrarse según el hardware real: motor, driver, microsteps, fuente, polea, banda, tornillo, sensores HOME, recorrido físico y carga mecánica.
