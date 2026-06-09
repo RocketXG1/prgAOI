@@ -1,0 +1,1868 @@
+MANUAL TÉCNICO: objAdvanceMotionControler.py
+Controlador avanzado de movimiento sincronizado para múltiples ejes XYZ con Raspberry Pi Pico/RP2040 y MicroPython.
+
+================================================================================
+1. TÍTULO DEL MANUAL
+================================================================================
+
+Manual técnico del archivo: objAdvanceMotionControler.py
+
+Propósito breve:
+    Este archivo implementa un controlador avanzado de movimiento multi-eje. Su
+    función es coordinar varios objetos de eje ya existentes para ejecutar
+    movimientos absolutos o relativos sincronizados, calculando un tiempo común
+    para que todos los ejes solicitados lleguen aproximadamente al mismo tiempo.
+
+    El módulo no genera pulsos STEP directamente, no controla pines GPIO y no
+    configura PIO. Actúa como capa de coordinación sobre ejes individuales que ya
+    implementan control de hardware, límites, HOME, perfiles y PIO.
+
+================================================================================
+2. INTRODUCCIÓN
+================================================================================
+
+objAdvanceMotionControler.py sirve para coordinar movimientos de varios ejes de
+un sistema cartesiano X/Y/Z. Está diseñado para trabajar con objetos de eje
+avanzados, por ejemplo instancias compatibles con AdvancedBeltStepperAxis o
+AdvancedScrewStepperAxis definidas en el módulo objAdvanceStepperAxis.py.
+
+Dentro del proyecto, este archivo pertenece a la capa de control de movimiento
+multi-eje. No es un controlador de bajo nivel de pines; es un controlador lógico
+que recibe objetivos en milímetros para ejes registrados, valida las condiciones
+de movimiento y arranca cada eje de manera no bloqueante con un mismo tiempo de
+movimiento.
+
+Clasificación funcional del módulo:
+    - Control de ejes: indirecto, porque utiliza objetos de eje ya creados.
+    - Control de movimiento: sí, coordina movimientos absolutos y relativos.
+    - Perfil avanzado: sí, solicita perfiles CONSTANT o TRAPEZOIDAL a cada eje.
+    - PIO: no lo usa directamente, pero depende de ejes que pueden usar PIO.
+    - Sincronización: sí, calcula un tiempo común para múltiples ejes.
+
+Problema que resuelve dentro de un sistema XYZ con Raspberry Pi Pico:
+    En una máquina cartesiana, mover X, Y y Z de forma secuencial produce una
+    trayectoria por tramos: primero se mueve un eje, luego otro, etc. Este módulo
+    permite solicitar un movimiento conjunto, por ejemplo X=120 mm e Y=80 mm, y
+    coordina ambos ejes para que inicien casi al mismo tiempo y terminen juntos.
+    Esto es esencial cuando se desea una trayectoria más coherente entre puntos,
+    especialmente en sistemas tipo CNC, impresora 3D, plotter, dosificador XYZ o
+    manipulador cartesiano.
+
+================================================================================
+3. CONTEXTO GENERAL DEL PROYECTO
+================================================================================
+
+El proyecto consiste en controlar motores a pasos de un sistema cartesiano con
+ejes X, Y y Z. Cada eje lineal representa una dirección física de movimiento y
+se desplaza mediante un motor paso a paso conectado a un mecanismo mecánico, por
+ejemplo una correa GT2, husillo, tornillo trapezoidal o sistema similar.
+
+Plataforma electrónica:
+    - Raspberry Pi Pico o microcontrolador basado en RP2040.
+    - Firmware MicroPython.
+    - Drivers externos de motor a pasos, por ejemplo A4988, DRV8825, TMC,
+      TB6600 u otros compatibles.
+
+Señales típicas hacia drivers externos:
+    - STEP: pulso por cada micro-paso o paso solicitado.
+    - DIR: define el sentido de giro del motor.
+    - ENABLE: habilita o deshabilita la etapa de potencia del driver.
+
+Relación con otros módulos del proyecto:
+    - objAdvanceStepperAxis.py:
+        Implementa ejes individuales avanzados. Estos objetos sí configuran
+        pines, PIO, límites, HOME y perfiles de movimiento. El controlador de
+        este manual espera que cada eje registrado implemente la API pública de
+        ese módulo.
+
+    - objStepperAxis.py:
+        Puede representar una versión más básica de control de eje. Este módulo
+        avanzado no hereda de él, pero conceptualmente cumple una función de
+        coordinación parecida a controladores más simples.
+
+    - objMotionControler.py:
+        Probablemente representa un controlador de movimiento más básico. El
+        archivo analizado es la versión avanzada porque incorpora cálculo de
+        tiempo mínimo y sincronización por perfil.
+
+Uso de PIO:
+    Este archivo no declara programas PIO ni instancia StateMachine. Sin embargo,
+    puede coordinar ejes que sí usan PIO internamente para generar pulsos STEP de
+    alta precisión. La razón de usar PIO en los ejes es descargar al intérprete
+    MicroPython de la generación exacta de pulsos, obteniendo temporización más
+    estable que con bucles de software.
+
+Naturaleza del controlador:
+    Este módulo no controla pines directamente. En lugar de eso, coordina objetos
+    de eje por composición. Cada objeto de eje se encarga de su propio hardware,
+    mientras AdvancedMotionController se encarga de validar, planificar, iniciar,
+    esperar, detener, habilitar y consultar el estado general.
+
+================================================================================
+4. RESUMEN DEL ARCHIVO
+================================================================================
+
+Cantidad de clases contenidas en el archivo:
+    1 clase.
+
+Clase encontrada:
+    1) AdvancedMotionController
+        Controlador de alto nivel para coordinar varios ejes avanzados.
+
+Constantes globales:
+    - STATE_IDLE = "IDLE"
+    - STATE_MOVING = "MOVING"
+    - STATE_HOMING = "HOMING"
+    - STATE_ERROR = "ERROR"
+    - STATE_STOPPED = "STOPPED"
+    - PROFILE_CONSTANT = "CONSTANT"
+    - PROFILE_TRAPEZOIDAL = "TRAPEZOIDAL"
+
+Funciones auxiliares globales:
+    - _sleep_ms(ms)
+        Pausa compatible con MicroPython y CPython. Usa time.sleep_ms() cuando
+        existe; si no existe, usa time.sleep(ms / 1000.0).
+
+Programa PIO:
+    No hay programa PIO en este archivo.
+
+Estructuras principales:
+    - Diccionario self.axes:
+        Almacena los ejes registrados por nombre normalizado en mayúsculas.
+
+    - Diccionario self.last_plan:
+        Guarda el último plan sincronizado calculado. Incluye modo de perfil,
+        tiempo común y datos de movimiento por eje.
+
+================================================================================
+5. CANTIDAD DE CLASES
+================================================================================
+
+Número total de clases:
+    1
+
+Clase 1: AdvancedMotionController
+    Responsabilidad:
+        Coordinar múltiples ejes avanzados para ejecutar movimientos absolutos,
+        movimientos relativos, HOME secuencial, paro general, habilitación,
+        deshabilitación y consulta de estado global.
+
+    Relación con otras clases:
+        No hereda de ninguna clase del proyecto. Usa composición: almacena
+        objetos de eje dentro de self.axes y llama sus métodos públicos.
+
+    Relación lógica:
+        AdvancedMotionController
+            contiene N objetos de eje compatibles con la API esperada:
+                - get_position()
+                - is_homed()
+                - is_busy()
+                - validate_target(target_mm)
+                - calculate_minimum_time_s(distance_mm)
+                - start_move_to_mm(target_mm, profile_mode, total_time_s)
+                - update()
+                - stop()
+                - home()
+                - enable()
+                - disable()
+                - get_status()
+
+================================================================================
+6. CANTIDAD DE VARIABLES Y ATRIBUTOS PRINCIPALES
+================================================================================
+
+6.1 Constantes globales de estado del controlador
+
+    STATE_IDLE
+        Estado en reposo. El controlador no está moviendo ni haciendo HOME.
+
+    STATE_MOVING
+        Estado de movimiento. Hay un plan sincronizado en ejecución.
+
+    STATE_HOMING
+        Estado de HOME. El controlador está ejecutando home_all().
+
+    STATE_ERROR
+        Estado de error. Alguna validación falló o un eje reportó ERROR.
+
+    STATE_STOPPED
+        Estado de paro. stop_all() fue ejecutado o un eje entró en STOPPED.
+
+6.2 Constantes globales de perfil
+
+    PROFILE_CONSTANT
+        Solicita perfil de velocidad constante. El tiempo mínimo se calcula como
+        distancia / velocidad máxima del eje.
+
+    PROFILE_TRAPEZOIDAL
+        Solicita perfil trapezoidal o triangular avanzado. El tiempo mínimo se
+        calcula delegando en axis.calculate_minimum_time_s(distance_mm).
+
+6.3 Atributos principales de AdvancedMotionController
+
+    Variables de configuración:
+        axes, parámetro opcional del constructor
+            Diccionario inicial de ejes. Sus claves son nombres como "X", "Y" o
+            "Z" y sus valores son objetos de eje compatibles.
+
+    Variables de estado:
+        self.state
+            Estado actual del controlador. Puede ser IDLE, MOVING, HOMING,
+            ERROR o STOPPED.
+
+        self.last_plan
+            Último plan sincronizado calculado. Se actualiza al llamar
+            create_synchronized_profile_plan(). Puede ser None si aún no se ha
+            calculado ningún plan.
+
+    Variables de hardware:
+        self.axes
+            Diccionario que contiene referencias a los objetos de eje. Aunque el
+            controlador no posee pines directamente, estos objetos sí representan
+            hardware real.
+
+    Variables de movimiento:
+        self.last_plan["profile_mode"]
+            Modo usado en el último plan: CONSTANT o TRAPEZOIDAL.
+
+        self.last_plan["common_time_s"]
+            Tiempo común seleccionado para sincronizar todos los ejes.
+
+        self.last_plan["axes"]
+            Diccionario con subplanes por eje. Para cada eje contiene:
+                - axis: objeto de eje.
+                - current_mm: posición inicial en mm.
+                - target_mm: objetivo absoluto en mm.
+                - delta_mm: diferencia objetivo - posición actual.
+                - distance_mm: distancia absoluta a recorrer.
+                - minimum_time_s: tiempo mínimo individual del eje.
+                - will_move: True si la distancia es mayor que cero.
+
+    Variables de error:
+        self.error_message
+            Mensaje de error principal del controlador.
+
+        self.error
+            Alias de compatibilidad con otros controladores del proyecto.
+            Contiene el mismo texto que self.error_message.
+
+================================================================================
+7. ENTRADAS DEL MÓDULO
+================================================================================
+
+7.1 Entradas del constructor AdvancedMotionController(axes=None)
+
+    axes
+        Tipo esperado:
+            dict o None.
+
+        Obligatorio:
+            No. Es opcional.
+
+        Formato esperado:
+            {
+                "X": eje_x,
+                "Y": eje_y,
+                "Z": eje_z
+            }
+
+        Ejemplo válido:
+            controller = AdvancedMotionController({"X": axis_x, "Y": axis_y})
+
+        Observación:
+            Los nombres se normalizan a mayúsculas, por lo que "x" y "X" se
+            almacenan internamente como "X".
+
+7.2 Entradas de add_axis(axis_name, axis_object)
+
+    axis_name
+        Tipo esperado:
+            str, aunque se acepta cualquier valor convertible a str.
+
+        Obligatorio:
+            Sí.
+
+        Ejemplos válidos:
+            "X", "Y", "Z", "A".
+
+    axis_object
+        Tipo esperado:
+            Objeto de eje compatible con la API esperada.
+
+        Obligatorio:
+            Sí.
+
+7.3 Entradas de move_to(targets, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+
+    targets
+        Tipo esperado:
+            dict con nombres de eje y posiciones absolutas en milímetros.
+
+        Obligatorio:
+            Sí.
+
+        Ejemplo válido:
+            {"X": 150.0, "Y": 80.0, "Z": 12.5}
+
+        Significado:
+            Cada valor es una coordenada absoluta respecto al cero definido por
+            HOME, no un incremento.
+
+    profile_mode
+        Tipo esperado:
+            str.
+
+        Opcional:
+            Sí. Valor por defecto: PROFILE_TRAPEZOIDAL.
+
+        Valores válidos:
+            "CONSTANT"
+            "TRAPEZOIDAL"
+
+    wait
+        Tipo esperado:
+            bool.
+
+        Opcional:
+            Sí. Valor por defecto: True.
+
+        Significado:
+            - True: el método bloquea hasta que el movimiento termina.
+            - False: arranca el movimiento y retorna inmediatamente.
+
+7.4 Entradas de move_relative(distances, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+
+    distances
+        Tipo esperado:
+            dict con nombres de eje y desplazamientos relativos en milímetros.
+
+        Obligatorio:
+            Sí.
+
+        Ejemplo válido:
+            {"X": 10.0, "Y": -5.0}
+
+        Significado:
+            Cada valor se suma a la posición actual reportada por el eje.
+
+7.5 Entradas de create_synchronized_profile_plan(targets, profile_mode)
+
+    targets
+        Tipo esperado:
+            dict de objetivos absolutos en mm.
+
+    profile_mode
+        Tipo esperado:
+            str, "CONSTANT" o "TRAPEZOIDAL".
+
+    Uso típico:
+            Se puede llamar directamente para inspeccionar el plan sin iniciar
+            movimiento físico. move_to() también lo llama internamente.
+
+7.6 Entradas de home_all(sequence=None)
+
+    sequence
+        Tipo esperado:
+            list, tuple o cualquier iterable con nombres de eje; también puede
+            ser None.
+
+        Opcional:
+            Sí.
+
+        Ejemplo válido:
+            ["Z", "X", "Y"]
+
+        Significado:
+            Define el orden de HOME. Si es None, se usa el orden de los ejes
+            registrados en self.axes.
+
+7.7 Valores típicos para máquina XYZ tipo Ender 3 V2 o similar
+
+    Este controlador recibe posiciones en mm; los parámetros mecánicos finos se
+    configuran en los objetos de eje, no aquí. Como referencia conceptual:
+
+    - Eje X/Y con correa GT2, polea de 20 dientes, motor 1.8 grados:
+        steps_per_mm típico con microsteps 16: aproximadamente 80 steps/mm.
+
+    - Eje Z con husillo T8 de 8 mm por vuelta, motor 1.8 grados:
+        steps_per_mm típico con microsteps 16: aproximadamente 400 steps/mm.
+
+    - Recorrido aproximado Ender 3 V2:
+        X: 0 a 220 mm.
+        Y: 0 a 220 mm.
+        Z: 0 a 250 mm.
+
+    - Velocidades iniciales prudentes para pruebas:
+        X/Y: 10 a 30 mm/s al inicio.
+        Z: 1 a 5 mm/s al inicio.
+
+    Estos valores no se establecen en AdvancedMotionController; se configuran en
+    los ejes antes de registrarlos.
+
+================================================================================
+8. SALIDAS DEL MÓDULO
+================================================================================
+
+8.1 Retornos booleanos
+
+    add_axis()
+        Devuelve True al registrar o reemplazar un eje.
+
+    move_to()
+        Devuelve True si el movimiento se inició y terminó correctamente cuando
+        wait=True, o si se inició correctamente cuando wait=False. Devuelve False
+        si falla una validación, el arranque de un eje o la supervisión.
+
+    move_relative()
+        Devuelve el mismo tipo de resultado que move_to().
+
+    wait_until_done()
+        Devuelve True si todos los ejes finalizan y el controlador vuelve a
+        IDLE. Devuelve False si algún eje entra en ERROR o STOPPED.
+
+    home_all()
+        Devuelve True si todos los HOME de la secuencia terminan correctamente.
+        Devuelve False si un eje no existe, no implementa home() o falla HOME.
+
+    stop_all(), enable_all(), disable_all()
+        Devuelven True tras ejecutar la acción sobre los ejes disponibles.
+
+    all_homed()
+        Devuelve True si todos los ejes registrados tienen HOME válido.
+
+    is_busy()
+        Devuelve True si el controlador está en MOVING/HOMING o si cualquier eje
+        registrado reporta ocupado mediante is_busy().
+
+8.2 Retornos de datos
+
+    get_axis(axis_name)
+        Devuelve el objeto de eje registrado o None si no existe.
+
+    create_synchronized_profile_plan()
+        Devuelve un diccionario de plan sincronizado o None si ocurre error.
+
+    get_position()
+        Devuelve un diccionario con posiciones actuales por eje, por ejemplo:
+            {"X": 120.0, "Y": 55.0, "Z": 10.0}
+
+    get_last_plan()
+        Devuelve self.last_plan. Puede ser None.
+
+    get_status()
+        Devuelve un diccionario con estado global:
+            {
+                "controller_state": estado,
+                "controller_error": mensaje_o_None,
+                "all_homed": True_o_False,
+                "positions": {...},
+                "last_plan": {...} o None,
+                "axes": {... estados por eje ...}
+            }
+
+8.3 Interpretación de estados internos
+
+    controller_state = "IDLE"
+        El controlador está listo para recibir movimiento o HOME.
+
+    controller_state = "MOVING"
+        Hay un movimiento sincronizado activo.
+
+    controller_state = "HOMING"
+        Se está ejecutando home_all().
+
+    controller_state = "ERROR"
+        Ocurrió un error lógico o un eje reportó error.
+
+    controller_state = "STOPPED"
+        Se ejecutó stop_all() o un eje reportó STOPPED.
+
+8.4 Mensajes de error
+
+    Los errores se almacenan en:
+        - self.error_message
+        - self.error
+        - get_status()["controller_error"]
+
+    Ejemplos de mensajes:
+        - "targets no puede ser None"
+        - "Eje no registrado: X"
+        - "El eje X requiere HOME"
+        - "El controlador ya esta en movimiento"
+        - "Objetivo invalido en eje X: ..."
+        - "profile_mode invalido: ..."
+        - "Paro general activado"
+
+================================================================================
+9. CLASES DEL ARCHIVO
+================================================================================
+
+9.1 AdvancedMotionController
+
+    Propósito:
+        Coordinar múltiples ejes lineales avanzados para ejecutar movimientos
+        sincronizados. El controlador recibe objetivos, valida que los ejes sean
+        correctos, que tengan HOME, que no estén ocupados y que los objetivos
+        estén dentro de límites. Luego calcula un plan con tiempo común y ordena
+        a cada eje iniciar su movimiento.
+
+    Cuándo se debe usar:
+        - Cuando se desea mover más de un eje al mismo tiempo.
+        - Cuando se necesita que X, Y y Z lleguen a sus objetivos al mismo
+          tiempo aproximado.
+        - Cuando ya existen objetos de eje individuales configurados.
+        - Cuando se requiere una capa centralizada para HOME, STOP, ENABLE,
+          DISABLE y consulta de estado.
+
+    Qué objetos representa:
+        Representa el controlador lógico de una máquina cartesiana o conjunto de
+        ejes. No representa un motor individual ni un pin físico.
+
+    Parámetros del constructor:
+        axes=None
+            Diccionario opcional de ejes iniciales. Si se suministra, cada eje se
+            registra llamando internamente a add_axis().
+
+    Atributos internos principales:
+        self.axes
+            Diccionario de ejes registrados.
+
+        self.state
+            Estado global del controlador.
+
+        self.error_message
+            Último error del controlador.
+
+        self.error
+            Alias del último error.
+
+        self.last_plan
+            Último plan sincronizado calculado.
+
+    Métodos principales:
+        - add_axis()
+        - get_axis()
+        - create_synchronized_profile_plan()
+        - move_to()
+        - move_relative()
+        - wait_until_done()
+        - home_all()
+        - stop_all()
+        - enable_all()
+        - disable_all()
+        - get_position()
+        - all_homed()
+        - is_busy()
+        - get_last_plan()
+        - get_status()
+
+    Métodos secundarios o internos:
+        - _normalize_axis_name()
+        - _set_error()
+        - _clear_error()
+        - _axis_error_message()
+        - _axis_state()
+        - _axis_error_state()
+        - _axis_stopped_state()
+        - _axis_is_homed()
+        - _normalize_targets()
+        - _validate_axis_names()
+        - _validate_homed()
+        - _validate_not_busy()
+        - _validate_limits()
+
+    Flujo típico de uso:
+        1) Crear objetos de eje avanzado.
+        2) Crear AdvancedMotionController.
+        3) Registrar ejes con add_axis() o pasarlos en el constructor.
+        4) Habilitar drivers con enable_all().
+        5) Ejecutar HOME con home_all().
+        6) Ejecutar movimiento absoluto con move_to().
+        7) Ejecutar movimiento relativo con move_relative() si se requiere.
+        8) Consultar get_position() o get_status().
+        9) Detener con stop_all() ante emergencia.
+
+    Errores comunes:
+        - Intentar mover sin haber hecho HOME.
+        - Usar nombres de eje no registrados.
+        - Pasar targets=None.
+        - Enviar objetivos fuera de límites.
+        - Intentar iniciar movimiento mientras un eje sigue ocupado.
+        - Registrar un objeto que no implementa la API esperada.
+        - Usar profile_mode diferente de CONSTANT o TRAPEZOIDAL.
+
+    Recomendaciones de uso:
+        - Registrar nombres simples y consistentes: X, Y, Z.
+        - Hacer HOME antes de cualquier movimiento absoluto real.
+        - Revisar get_status() después de un error.
+        - Usar wait=True para pruebas iniciales.
+        - Usar wait=False solo si el programa principal llamará a
+          wait_until_done() o actualizará/supervisará los ejes correctamente.
+        - Validar primero movimientos pequeños y lentos.
+
+================================================================================
+10. FUNCIONES Y MÉTODOS
+================================================================================
+
+10.1 _sleep_ms(ms)
+    Clase:
+        Ninguna. Función auxiliar global.
+
+    Propósito:
+        Pausar en milisegundos con compatibilidad entre MicroPython y CPython.
+
+    Entradas:
+        ms: número de milisegundos.
+
+    Salida:
+        No devuelve valor útil.
+
+    Efectos internos:
+        Detiene temporalmente el hilo de ejecución.
+
+    Bloqueante:
+        Sí, durante el tiempo indicado.
+
+    Errores posibles:
+        No valida explícitamente ms. Valores no numéricos podrían fallar en
+        time.sleep().
+
+10.2 __init__(axes=None)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Inicializar el controlador, estado, errores y ejes opcionales.
+
+    Entradas:
+        axes: dict opcional de ejes.
+
+    Salida:
+        Constructor; no retorna valor.
+
+    Efectos internos:
+        Inicializa self.axes, self.state, self.error_message, self.error y
+        self.last_plan. Registra ejes si axes no es None.
+
+    Bloqueante:
+        No.
+
+10.3 _normalize_axis_name(axis_name)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Convertir un nombre de eje a texto en mayúsculas.
+
+    Entradas:
+        axis_name: valor convertible a str.
+
+    Salida:
+        str en mayúsculas.
+
+    Efectos internos:
+        Ninguno.
+
+10.4 _set_error(message)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Guardar mensaje de error y pasar el controlador a STATE_ERROR.
+
+    Entradas:
+        message: texto o valor convertible a str.
+
+    Salida:
+        False. Esto permite usar return self._set_error(...).
+
+    Efectos internos:
+        Modifica self.error_message, self.error y self.state.
+
+10.5 _clear_error()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Limpiar el error del controlador.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        None.
+
+    Efectos internos:
+        self.error_message = None y self.error = None.
+
+10.6 _axis_error_message(axis)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Obtener un mensaje de error observable desde un eje.
+
+    Entradas:
+        axis: objeto de eje.
+
+    Salida:
+        Texto del error o None.
+
+    Efectos internos:
+        Puede llamar axis.get_status(). No modifica el controlador.
+
+    Dependencias:
+        Atributos axis.error_message, axis.error o método axis.get_status().
+
+10.7 _axis_state(axis)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Leer el estado de un eje.
+
+    Entradas:
+        axis: objeto de eje.
+
+    Salida:
+        Estado del eje o None.
+
+    Dependencias:
+        axis.get_status() o axis.state.
+
+10.8 _axis_error_state(axis)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Determinar qué valor representa ERROR en el eje.
+
+    Entradas:
+        axis: objeto de eje.
+
+    Salida:
+        axis.STATE_ERROR si existe; si no, "ERROR".
+
+10.9 _axis_stopped_state(axis)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Determinar qué valor representa STOPPED en el eje.
+
+    Entradas:
+        axis: objeto de eje.
+
+    Salida:
+        axis.STATE_STOPPED si existe; si no, "STOPPED".
+
+10.10 _axis_is_homed(axis)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Determinar si un eje tiene HOME válido.
+
+    Entradas:
+        axis: objeto de eje.
+
+    Salida:
+        bool.
+
+    Dependencias:
+        axis.is_homed(), axis.is_homed_flag o get_status()["homed"].
+
+10.11 add_axis(axis_name, axis_object)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Agregar o reemplazar un eje registrado.
+
+    Entradas:
+        axis_name: nombre de eje.
+        axis_object: objeto de eje.
+
+    Salida:
+        True.
+
+    Efectos internos:
+        Modifica self.axes.
+
+10.12 get_axis(axis_name)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Obtener un eje registrado por nombre.
+
+    Entradas:
+        axis_name: nombre de eje.
+
+    Salida:
+        Objeto de eje o None.
+
+10.13 _normalize_targets(targets)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Normalizar nombres de ejes y convertir valores a float.
+
+    Entradas:
+        targets: dict o None.
+
+    Salida:
+        dict normalizado o None.
+
+    Errores posibles:
+        Si algún valor no puede convertirse a float, se generará ValueError.
+        El método no captura esa excepción.
+
+10.14 _validate_axis_names(targets)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Verificar que todos los ejes solicitados existan en self.axes.
+
+    Entradas:
+        targets: dict normalizado.
+
+    Salida:
+        True si todo es válido; False si falla.
+
+    Efectos internos:
+        En caso de falla llama _set_error().
+
+10.15 _validate_homed(targets)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Verificar que los ejes solicitados tengan HOME válido.
+
+    Entradas:
+        targets: dict normalizado.
+
+    Salida:
+        True o False.
+
+    Efectos internos:
+        En caso de falla registra error.
+
+10.16 _validate_not_busy()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Impedir movimientos nuevos si el controlador o algún eje está ocupado.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        True o False.
+
+    Efectos internos:
+        Puede cambiar estado a ERROR si encuentra ocupación inválida.
+
+10.17 _validate_limits(targets)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Validar que cada objetivo esté dentro de límites físicos del eje.
+
+    Entradas:
+        targets: dict de objetivos absolutos.
+
+    Salida:
+        True o False.
+
+    Dependencias:
+        axis.validate_target(target_mm).
+
+    Errores posibles:
+        Error si un eje no implementa validate_target() o rechaza el objetivo.
+
+10.18 create_synchronized_profile_plan(targets, profile_mode=PROFILE_TRAPEZOIDAL)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Calcular un plan sincronizado para que todos los ejes lleguen juntos.
+
+    Entradas:
+        targets: dict de objetivos absolutos.
+        profile_mode: "CONSTANT" o "TRAPEZOIDAL".
+
+    Salida:
+        Diccionario plan o None.
+
+    Efectos internos:
+        Actualiza self.last_plan.
+
+    Modifica movimiento:
+        No mueve físicamente. Solo calcula.
+
+    Cálculo principal:
+        Para cada eje:
+            current_mm = axis.get_position()
+            delta_mm = target_mm - current_mm
+            distance_mm = abs(delta_mm)
+            minimum_time_s = tiempo mínimo individual
+
+        Luego:
+            common_time_s = máximo de todos los minimum_time_s
+
+    Dependencias:
+        - axis.get_position()
+        - axis.max_speed_mm_s para perfil CONSTANT.
+        - axis.calculate_minimum_time_s() para perfil TRAPEZOIDAL.
+
+10.19 move_to(targets, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Ejecutar movimiento absoluto sincronizado.
+
+    Entradas:
+        targets: dict de posiciones absolutas en mm.
+        profile_mode: modo de perfil.
+        wait: booleano que define si bloquea hasta terminar.
+
+    Salida:
+        True o False.
+
+    Efectos internos:
+        Valida condiciones, crea plan, cambia estado a MOVING, llama
+        axis.start_move_to_mm() en cada eje que deba moverse y opcionalmente
+        llama wait_until_done().
+
+    Bloqueante:
+        - Sí si wait=True.
+        - No si wait=False, siempre que el arranque sea correcto.
+
+    Puede generar error:
+        Sí, por eje no registrado, sin HOME, ocupado, fuera de límites, modo de
+        perfil inválido o falla al iniciar un eje.
+
+10.20 move_relative(distances, profile_mode=PROFILE_TRAPEZOIDAL, wait=True)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Ejecutar desplazamiento relativo sincronizado.
+
+    Entradas:
+        distances: dict de incrementos en mm.
+        profile_mode: modo de perfil.
+        wait: booleano.
+
+    Salida:
+        True o False.
+
+    Efectos internos:
+        Convierte distancias relativas a objetivos absolutos usando
+        axis.get_position(), y luego llama move_to().
+
+    Bloqueante:
+        Igual que move_to().
+
+10.21 wait_until_done()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Supervisar ejes hasta que el movimiento sincronizado termine.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        True si termina correctamente; False si detecta ERROR o STOPPED.
+
+    Efectos internos:
+        Llama update() sobre ejes ocupados si existe ese método. Cambia el estado
+        a IDLE cuando ningún eje está ocupado. Cambia a ERROR o STOPPED si un eje
+        reporta esos estados.
+
+    Bloqueante:
+        Sí mientras self.state sea MOVING.
+
+10.22 home_all(sequence=None)
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Ejecutar HOME en todos los ejes en secuencia.
+
+    Entradas:
+        sequence: orden opcional de nombres de eje.
+
+    Salida:
+        True o False.
+
+    Efectos internos:
+        Cambia estado a HOMING, llama axis.home() por cada eje y vuelve a IDLE si
+        todo sale correctamente.
+
+    Bloqueante:
+        Sí, porque ejecuta HOME de forma secuencial.
+
+    Nota de seguridad:
+        El HOME secuencial evita colisiones o movimientos simultáneos no
+        deseados durante búsqueda de referencia.
+
+10.23 stop_all()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Detener todos los ejes registrados.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        True.
+
+    Efectos internos:
+        Llama axis.stop() si existe, cambia estado a STOPPED y registra el error
+        "Paro general activado".
+
+    Bloqueante:
+        Normalmente no, salvo que axis.stop() implemente alguna espera interna.
+
+10.24 enable_all()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Habilitar todos los drivers mediante cada eje.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        True.
+
+    Efectos internos:
+        Llama axis.enable() si existe.
+
+10.25 disable_all()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Deshabilitar todos los drivers mediante cada eje.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        True.
+
+    Efectos internos:
+        Llama axis.disable() si existe.
+
+10.26 get_position()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Obtener posiciones actuales de todos los ejes.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        Diccionario con posiciones por eje.
+
+    Dependencias:
+        axis.get_position() debe existir.
+
+10.27 all_homed()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Verificar si todos los ejes registrados tienen HOME válido.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        bool.
+
+10.28 is_busy()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Verificar si el controlador o cualquier eje está ocupado.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        bool.
+
+10.29 get_last_plan()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Obtener el último plan sincronizado.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        self.last_plan.
+
+10.30 get_status()
+    Clase:
+        AdvancedMotionController.
+
+    Propósito:
+        Obtener un resumen completo del controlador y de cada eje.
+
+    Entradas:
+        Ninguna.
+
+    Salida:
+        Diccionario de estado global.
+
+    Efectos internos:
+        Llama all_homed(), get_position() y axis.get_status() si existe.
+
+================================================================================
+11. EXPLICACIÓN DEL FLUJO INTERNO
+================================================================================
+
+11.1 Inicialización
+
+    1) Se instancia AdvancedMotionController.
+    2) Se inicializa self.axes como diccionario vacío.
+    3) El estado inicial se define como STATE_IDLE.
+    4) Se limpian errores iniciales con error_message=None y error=None.
+    5) last_plan inicia en None.
+    6) Si el constructor recibe axes, cada eje se agrega con add_axis().
+
+11.2 Registro de ejes
+
+    1) add_axis(axis_name, axis_object) normaliza el nombre a mayúsculas.
+    2) El objeto se guarda en self.axes[nombre].
+    3) Si ya existía un eje con ese nombre, se reemplaza.
+
+11.3 Validación de movimiento absoluto
+
+    Al llamar move_to(targets):
+
+    1) _normalize_targets() convierte nombres a mayúsculas y valores a float.
+    2) _validate_not_busy() verifica que el controlador no esté en MOVING ni
+       HOMING, y que ningún eje reportado por is_busy() esté ocupado.
+    3) _validate_axis_names() verifica que todos los nombres existan.
+    4) _validate_homed() verifica que cada eje solicitado tenga HOME.
+    5) _validate_limits() llama validate_target() en cada eje.
+
+    Si una validación falla:
+        - Se registra error.
+        - El estado cambia a ERROR.
+        - move_to() retorna False.
+
+11.4 Cálculo de objetivos
+
+    Movimiento absoluto:
+        El objetivo recibido ya es una coordenada absoluta.
+        Ejemplo: {"X": 100.0} significa ir a X=100 mm.
+
+    Movimiento relativo:
+        move_relative() convierte cada incremento a objetivo absoluto:
+            target = axis.get_position() + distance
+        Luego llama move_to(targets).
+
+11.5 Cálculo de tiempo mínimo
+
+    create_synchronized_profile_plan() calcula para cada eje:
+
+        current_mm = posición actual del eje
+        target_mm = objetivo absoluto
+        delta_mm = target_mm - current_mm
+        distance_mm = abs(delta_mm)
+
+    Si distance_mm <= 0:
+        minimum_time_s = 0.0
+
+    Si profile_mode == CONSTANT:
+        minimum_time_s = distance_mm / axis.max_speed_mm_s
+
+    Si profile_mode == TRAPEZOIDAL:
+        minimum_time_s = axis.calculate_minimum_time_s(distance_mm)
+
+11.6 Perfil trapezoidal
+
+    Este controlador no construye directamente los segmentos trapezoidales; los
+    calcula el eje avanzado. Sin embargo, sí decide el tiempo total común. En un
+    perfil trapezoidal típico existen tres zonas:
+
+        1) Aceleración:
+            La velocidad aumenta desde una velocidad mínima hasta la velocidad
+            de crucero posible.
+
+        2) Velocidad constante:
+            El eje mantiene velocidad estable durante una parte del trayecto si
+            la distancia es suficiente.
+
+        3) Desaceleración:
+            La velocidad baja para llegar al objetivo sin exceder el perfil.
+
+    Si la distancia es corta, el perfil puede ser triangular en vez de
+    trapezoidal: acelera y desacelera sin una zona larga de velocidad constante.
+
+11.7 Segmentos de aceleración, velocidad constante y desaceleración
+
+    En el diseño esperado, el objeto de eje avanzado divide el movimiento en
+    segmentos pequeños. Cada segmento tiene cantidad de pasos y frecuencia. El
+    controlador solo indica:
+        - target_mm
+        - profile_mode
+        - total_time_s común
+
+    El eje decide internamente cómo repartir los pasos entre segmentos.
+
+11.8 Sincronización de tiempo común
+
+    El controlador calcula el tiempo mínimo de cada eje y selecciona:
+
+        common_time_s = max(minimum_time_s de todos los ejes)
+
+    Esto significa:
+        - El eje más lento o con trayecto más largo define el tiempo común.
+        - Los demás ejes deben adaptar su perfil para tardar ese mismo tiempo.
+        - Todos los ejes reciben total_time_s=common_time_s al iniciar.
+
+11.9 Inicio de movimiento paralelo
+
+    Después de calcular el plan:
+
+    1) El controlador cambia a STATE_MOVING.
+    2) Recorre los ejes del plan.
+    3) Para cada eje con will_move=True llama:
+
+        axis.start_move_to_mm(
+            target_mm,
+            profile_mode=profile_mode,
+            total_time_s=common_time_s
+        )
+
+    4) Si un eje falla al iniciar, detiene los ejes ya arrancados con stop().
+
+11.10 Espera de finalización
+
+    Si wait=True:
+        move_to() llama wait_until_done().
+
+    wait_until_done() hace un bucle mientras el controlador esté en MOVING:
+        1) Revisa si algún eje está ocupado.
+        2) Si un eje ocupado tiene update(), llama update().
+        3) Revisa si algún eje reporta ERROR.
+        4) Revisa si algún eje reporta STOPPED.
+        5) Si ningún eje está ocupado, cambia a IDLE y retorna True.
+        6) Entre iteraciones espera 1 ms con _sleep_ms(1).
+
+11.11 Manejo de errores
+
+    El módulo centraliza errores en _set_error(). Cuando hay una falla:
+        - state = STATE_ERROR.
+        - error_message recibe la descripción.
+        - error recibe el mismo texto.
+        - El método afectado retorna False o None según corresponda.
+
+11.12 Stop general
+
+    stop_all() recorre todos los ejes registrados y llama stop() si existe.
+    Después marca:
+        state = STATE_STOPPED
+        error_message = "Paro general activado"
+        error = "Paro general activado"
+
+    Después de un STOP, la posición puede no ser confiable en sistemas de lazo
+    abierto, porque el controlador no tiene encoder para confirmar si se perdieron
+    pasos.
+
+================================================================================
+12. DIAGRAMA ASCII DE RELACIÓN ENTRE CLASES
+================================================================================
+
+No hay herencia dentro de este archivo. La relación principal es por composición:
+
+    +--------------------------------+
+    | AdvancedMotionController       |
+    |--------------------------------|
+    | axes: dict                     |
+    | state                          |
+    | error_message / error          |
+    | last_plan                      |
+    +---------------+----------------+
+                    |
+                    | contiene y coordina
+                    v
+        +-----------+-----------+-----------+
+        |                       |           |
+        v                       v           v
+    +-------------+       +-------------+  +-------------+
+    | Eje X       |       | Eje Y       |  | Eje Z       |
+    | compatible  |       | compatible  |  | compatible  |
+    | API eje     |       | API eje     |  | API eje     |
+    +-------------+       +-------------+  +-------------+
+        |                       |           |
+        v                       v           v
+    STEP/DIR/ENABLE        STEP/DIR/ENABLE  STEP/DIR/ENABLE
+    HOME/PIO interno       HOME/PIO interno HOME/PIO interno
+
+================================================================================
+13. DIAGRAMA ASCII DE LLAMADAS ENTRE FUNCIONES
+================================================================================
+
+Movimiento absoluto:
+
+    move_to(targets)
+    |
+    +--> _normalize_targets(targets)
+    |
+    +--> _validate_not_busy()
+    |
+    +--> _validate_axis_names(normalized_targets)
+    |
+    +--> _validate_homed(normalized_targets)
+    |    |
+    |    +--> _axis_is_homed(axis)
+    |
+    +--> _validate_limits(normalized_targets)
+    |    |
+    |    +--> axis.validate_target(target_mm)
+    |    +--> _axis_error_message(axis) [si falla]
+    |
+    +--> create_synchronized_profile_plan(normalized_targets, profile_mode)
+    |    |
+    |    +--> _normalize_targets(targets)
+    |    +--> _validate_axis_names(normalized_targets)
+    |    +--> axis.get_position()
+    |    +--> axis.calculate_minimum_time_s(distance_mm) [TRAPEZOIDAL]
+    |
+    +--> axis.start_move_to_mm(target_mm, profile_mode, total_time_s)
+    |
+    +--> wait_until_done() [si wait=True]
+         |
+         +--> axis.is_busy()
+         +--> axis.update()
+         +--> _axis_state(axis)
+         +--> _axis_error_state(axis)
+         +--> _axis_stopped_state(axis)
+         +--> _axis_error_message(axis) [si falla]
+         +--> _sleep_ms(1)
+
+Movimiento relativo:
+
+    move_relative(distances)
+    |
+    +--> _normalize_targets(distances)
+    +--> _validate_axis_names(normalized_distances)
+    +--> axis.get_position()
+    +--> move_to(targets_absolutos)
+
+HOME general:
+
+    home_all(sequence)
+    |
+    +--> _validate_not_busy()
+    +--> _normalize_axis_name(axis_name)
+    +--> get_axis(name)
+    +--> axis.home()
+    +--> _axis_error_message(axis) [si falla]
+
+Paro general:
+
+    stop_all()
+    |
+    +--> axis.stop()
+    +--> state = STOPPED
+
+Estado:
+
+    get_status()
+    |
+    +--> all_homed()
+    |    +--> _axis_is_homed(axis)
+    |
+    +--> get_position()
+    |    +--> axis.get_position()
+    |
+    +--> axis.get_status()
+
+================================================================================
+14. DIAGRAMA ASCII DEL FLUJO DE OPERACIÓN
+================================================================================
+
+    Inicio del programa
+    |
+    v
+    Crear ejes individuales X/Y/Z
+    |
+    v
+    Configurar pines, límites, velocidades y parámetros mecánicos en cada eje
+    |
+    v
+    Crear AdvancedMotionController
+    |
+    v
+    Registrar ejes con add_axis() o constructor axes={...}
+    |
+    v
+    enable_all()
+    |
+    v
+    home_all([orden recomendado])
+    |
+    v
+    ¿HOME correcto?
+    |------------------- no -------------------+
+    |                                          |
+    sí                                         v
+    |                                  Revisar get_status()
+    v                                  Corregir sensor/límites
+    move_to({"X": ..., "Y": ..., "Z": ...})
+    |
+    v
+    create_synchronized_profile_plan()
+    |
+    v
+    start_move_to_mm() en cada eje
+    |
+    v
+    wait_until_done() si wait=True
+    |
+    v
+    ¿Movimiento correcto?
+    |------------------- no -------------------+
+    |                                          |
+    sí                                         v
+    |                                  stop_all() si es necesario
+    v                                  Revisar error_message
+    get_position() / get_status()
+    |
+    v
+    Fin o siguiente movimiento
+
+================================================================================
+15. EXPLICACIÓN DE MOVIMIENTO ABSOLUTO Y RELATIVO
+================================================================================
+
+15.1 Movimiento absoluto
+
+    El movimiento absoluto usa coordenadas respecto al cero de máquina definido
+    por HOME. En este módulo se ejecuta con move_to().
+
+    Ejemplo:
+        Posición inicial de X después de HOME: 0 mm.
+
+        move_to({"X": 150})
+            Resultado: X se mueve hasta la coordenada absoluta 150 mm.
+
+        move_to({"X": 70})
+            Resultado: X regresa desde 150 mm hasta la coordenada absoluta
+            70 mm. No suma 70 mm; va a la posición 70 mm.
+
+    Interpretación:
+        El valor indicado es el destino final en el sistema de coordenadas de la
+        máquina.
+
+15.2 Movimiento relativo
+
+    El movimiento relativo usa incrementos respecto a la posición actual. En este
+    módulo se ejecuta con move_relative().
+
+    Ejemplo:
+        Posición actual de X: 150 mm.
+
+        move_relative({"X": 70})
+            Resultado: X se mueve a 220 mm, porque 150 + 70 = 220.
+
+        move_relative({"X": -20})
+            Resultado: X se mueve a 200 mm, porque 220 - 20 = 200.
+
+15.3 Ejemplo multi-eje
+
+    Posición actual:
+        X = 50 mm
+        Y = 20 mm
+
+    Movimiento absoluto:
+        move_to({"X": 100, "Y": 40})
+            X recorre +50 mm.
+            Y recorre +20 mm.
+            El controlador calcula un tiempo común para que ambos terminen juntos.
+
+    Movimiento relativo:
+        move_relative({"X": 100, "Y": 40})
+            X termina en 150 mm.
+            Y termina en 60 mm.
+            También se sincroniza el tiempo común.
+
+================================================================================
+16. MANEJO DE ERRORES
+================================================================================
+
+16.1 Eje sin HOME
+
+    Causa:
+        Se llamó move_to() o move_relative() sobre un eje que no ha sido
+        referenciado.
+
+    Detección:
+        move_to() retorna False.
+        get_status()["controller_error"] indica "El eje X requiere HOME".
+
+    Corrección:
+        Ejecutar home_all() o axis.home() antes del movimiento.
+
+16.2 Objetivo fuera de límite
+
+    Causa:
+        El destino solicitado está por debajo de min_position_mm o por encima de
+        max_position_mm del eje.
+
+    Detección:
+        _validate_limits() falla y el error puede incluir el mensaje del eje.
+
+    Corrección:
+        Revisar límites físicos, coordenadas de trabajo y dimensiones de la
+        máquina.
+
+16.3 Eje ocupado
+
+    Causa:
+        Se intenta iniciar un nuevo movimiento cuando el controlador está en
+        MOVING/HOMING o cuando un eje reporta is_busy()=True.
+
+    Detección:
+        Mensajes como:
+            - "El controlador ya esta en movimiento"
+            - "El controlador esta ejecutando HOME"
+            - "El eje X esta ocupado"
+
+    Corrección:
+        Esperar a que termine el movimiento con wait_until_done() o revisar la
+        lógica del programa principal si se usa wait=False.
+
+16.4 Falla de sensor HOME
+
+    Causa:
+        El método home() de un eje retorna False. Puede ocurrir por sensor mal
+        cableado, lógica invertida, home_pin incorrecto, dirección incorrecta o
+        límites mecánicos.
+
+    Detección:
+        home_all() retorna False y registra "Fallo HOME en eje X" con posible
+        detalle del eje.
+
+    Corrección:
+        Verificar cableado, pull-up, home_active_low, home_direction y distancia
+        disponible para buscar HOME.
+
+16.5 Parámetros inválidos
+
+    Causa:
+        - targets=None.
+        - Valor no convertible a float.
+        - profile_mode desconocido.
+        - max_speed_mm_s <= 0 en perfil CONSTANT.
+        - El eje no implementa métodos requeridos.
+
+    Detección:
+        Algunas condiciones retornan False con error_message; otras, como float()
+        sobre texto inválido, pueden lanzar ValueError porque el módulo no usa
+        try/except para capturarlas.
+
+    Corrección:
+        Validar tipos y valores antes de llamar al controlador.
+
+16.6 Movimiento detenido
+
+    Causa:
+        Se ejecutó stop_all() o un eje reportó STOPPED durante wait_until_done().
+
+    Detección:
+        state = STOPPED.
+        error_message = "Paro general activado" o "El eje X entro en STOPPED".
+
+    Corrección:
+        Investigar causa del paro. Después de un STOP puede ser necesario hacer
+        HOME nuevamente para recuperar posición confiable.
+
+16.7 Posición no confiable después de STOP
+
+    Causa:
+        En motores paso a paso de lazo abierto no hay encoder que confirme la
+        posición real. Si se detiene de emergencia, se pierden pasos o se mueve a
+        mano el eje, la posición interna puede no coincidir con la real.
+
+    Detección:
+        La máquina no queda físicamente donde el software cree.
+
+    Corrección:
+        Ejecutar HOME nuevamente antes de continuar con movimientos precisos.
+
+16.8 Eje no registrado
+
+    Causa:
+        El diccionario targets usa un nombre que no existe en self.axes.
+
+    Detección:
+        "Eje no registrado: X".
+
+    Corrección:
+        Registrar el eje con add_axis() o corregir el nombre.
+
+16.9 Falla al iniciar eje
+
+    Causa:
+        axis.start_move_to_mm() retorna False.
+
+    Detección:
+        move_to() detiene los ejes ya iniciados y registra:
+            "No se pudo iniciar eje X".
+
+    Corrección:
+        Revisar estado interno del eje, límites, PIO, disponibilidad de
+        StateMachine y parámetros de perfil.
+
+================================================================================
+17. RECOMENDACIONES DE USO
+================================================================================
+
+17.1 Mejores prácticas
+
+    - Crear y probar cada eje individual antes de usar sincronización multi-eje.
+    - Confirmar que get_position(), is_homed(), validate_target() y
+      start_move_to_mm() funcionan por eje.
+    - Hacer HOME después de encender la máquina.
+    - Usar nombres de eje en mayúscula por claridad, aunque el controlador los
+      normaliza automáticamente.
+    - Revisar get_status() después de cada falla.
+    - Mantener velocidades bajas durante las primeras pruebas.
+
+17.2 Orden recomendado de pruebas
+
+    1) Probar enable_all() y disable_all() sin mover motores.
+    2) Probar dirección de cada eje con movimientos muy cortos desde el módulo de
+       eje individual.
+    3) Probar sensores HOME con is_home_active() en el eje si está disponible.
+    4) Ejecutar HOME por eje.
+    5) Ejecutar home_all() con secuencia segura.
+    6) Ejecutar move_to() con un solo eje.
+    7) Ejecutar move_to() con dos ejes.
+    8) Ejecutar move_to() con tres ejes.
+    9) Probar move_relative() con incrementos pequeños.
+    10) Aumentar velocidad gradualmente.
+
+17.3 Velocidades iniciales recomendadas
+
+    Para pruebas con una máquina tipo Ender 3 V2 o similar:
+        - X/Y: iniciar entre 10 y 30 mm/s.
+        - Z: iniciar entre 1 y 5 mm/s.
+        - Aceleración: iniciar baja, por ejemplo 50 a 200 mm/s2 según mecánica.
+
+    Estas velocidades se configuran en los ejes, no en este controlador.
+
+17.4 Qué validar antes de conectar motores reales
+
+    - Pines STEP, DIR y ENABLE correctos en cada eje.
+    - Tierra común entre Raspberry Pi Pico y drivers.
+    - Corriente del driver ajustada al motor.
+    - Alimentación del motor adecuada.
+    - Sensor HOME probado eléctricamente.
+    - Límites min_position_mm y max_position_mm coherentes.
+    - Estado enable_active_low correcto para el driver.
+
+17.5 Si el motor gira al revés
+
+    Soluciones posibles:
+        - Cambiar invert_direction en el objeto de eje.
+        - Invertir una bobina del motor, si se conoce el cableado.
+        - Ajustar home_direction si el HOME busca hacia el lado incorrecto.
+
+    Recomendación:
+        Preferir corregir invert_direction en software durante pruebas, siempre
+        verificando que HOME se mueva hacia el sensor correcto.
+
+17.6 Si el sensor HOME trabaja invertido
+
+    Síntomas:
+        - HOME falla inmediatamente.
+        - El eje cree que el sensor está activo cuando no lo está.
+        - El eje no detecta el sensor aunque físicamente se active.
+
+    Corrección:
+        Ajustar home_active_low en el objeto de eje individual.
+
+17.7 Ajuste de microsteps y steps_per_mm
+
+    El controlador no calcula steps_per_mm; eso corresponde al eje. Para ajustar:
+        1) Configurar microsteps igual que en el driver físico.
+        2) Calcular transmisión mecánica real.
+        3) Mover una distancia conocida.
+        4) Medir distancia real.
+        5) Corregir steps_per_mm o parámetros mecánicos del eje.
+
+    Fórmula conceptual de corrección:
+        steps_per_mm_nuevo = steps_per_mm_actual * distancia_ordenada / distancia_real
+
+================================================================================
+18. LIMITACIONES DEL MÓDULO
+================================================================================
+
+    - No controla pines directamente.
+    - No genera pulsos STEP.
+    - No configura PIO ni StateMachine.
+    - No implementa drivers de motor.
+    - No implementa cinemática compleja, interpolación real de trayectoria ni
+      planeación por bloques tipo firmware de impresora 3D completo.
+    - No implementa encoder ni control closed-loop.
+    - No detecta pérdida de pasos.
+    - No corrige posición real si un motor se salta pasos.
+    - Requiere drivers externos STEP/DIR/ENABLE.
+    - Requiere que cada eje registrado implemente correctamente la API esperada.
+    - Requiere HOME para que la posición sea confiable antes de mover.
+    - La sincronización se basa en entregar un tiempo común a cada eje; la
+      precisión final depende de la implementación interna de cada eje.
+    - home_all() es secuencial, no sincronizado. Esto es más seguro, pero más
+      lento que mover todos los ejes simultáneamente.
+    - _normalize_targets() puede lanzar excepción si recibe valores no
+      convertibles a float.
+    - get_position() asume que todos los ejes implementan get_position().
+
+================================================================================
+19. EJEMPLO CONCEPTUAL DE USO
+================================================================================
+
+    # Ejemplo conceptual. Los objetos axis_x, axis_y y axis_z deben crearse
+    # previamente usando las clases de eje avanzado correspondientes.
+
+    from objAdvanceMotionControler import AdvancedMotionController
+    from objAdvanceMotionControler import PROFILE_TRAPEZOIDAL
+
+    controller = AdvancedMotionController()
+
+    controller.add_axis("X", axis_x)
+    controller.add_axis("Y", axis_y)
+    controller.add_axis("Z", axis_z)
+
+    controller.enable_all()
+
+    ok = controller.home_all(["Z", "X", "Y"])
+    if not ok:
+        print(controller.get_status())
+    else:
+        controller.move_to(
+            {"X": 120.0, "Y": 80.0, "Z": 10.0},
+            profile_mode=PROFILE_TRAPEZOIDAL,
+            wait=True
+        )
+
+        controller.move_relative(
+            {"X": -20.0, "Y": 15.0},
+            profile_mode=PROFILE_TRAPEZOIDAL,
+            wait=True
+        )
+
+        print(controller.get_position())
+
+    controller.disable_all()
+
+Explicación del ejemplo:
+    1) Se crea el controlador.
+    2) Se registran los ejes.
+    3) Se habilitan drivers.
+    4) Se hace HOME en una secuencia segura.
+    5) Se ejecuta un movimiento absoluto sincronizado.
+    6) Se ejecuta un movimiento relativo sincronizado.
+    7) Se consulta la posición.
+    8) Se deshabilitan drivers.
+
+================================================================================
+20. CONCLUSIÓN
+================================================================================
+
+objAdvanceMotionControler.py cumple el papel de coordinador avanzado de
+movimiento para una máquina cartesiana X/Y/Z basada en Raspberry Pi Pico/RP2040
+y MicroPython. Su objetivo principal es sincronizar varios ejes para que lleguen
+a sus objetivos en un mismo tiempo común, delegando la generación real de pulsos,
+el manejo de PIO, HOME, límites y perfiles segmentados a los objetos de eje.
+
+Dentro del sistema completo, este archivo se ubica por encima de los módulos de
+eje. No reemplaza a objAdvanceStepperAxis.py; lo utiliza. Su valor principal es
+organizar movimientos multi-eje, validar condiciones antes de mover, centralizar
+HOME/STOP/ENABLE/DISABLE y entregar una vista global del estado de la máquina.
+
+Para usarlo correctamente, primero deben configurarse y probarse los ejes
+individuales. Después se registran en AdvancedMotionController, se ejecuta HOME y
+recién entonces se realizan movimientos absolutos o relativos sincronizados.
+
+================================================================================
+OBSERVACIONES Y MEJORAS RECOMENDADAS
+================================================================================
+
+1) Nombre del archivo
+    El nombre objAdvanceMotionControler.py usa "Controler" con una sola letra
+    "l". En inglés técnico normalmente se escribe "Controller". Cambiarlo podría
+    mejorar consistencia, pero afectaría imports existentes.
+
+2) Captura de errores de conversión
+    _normalize_targets() convierte valores con float(). Si recibe texto inválido
+    o estructuras no numéricas, puede lanzar ValueError. Sería útil validar y
+    devolver _set_error() con un mensaje controlado.
+
+3) Validación más estricta de API de eje
+    add_axis() acepta cualquier objeto. Podría agregarse una validación opcional
+    para comprobar que el eje implementa los métodos mínimos antes de guardarlo.
+
+4) Estado después de stop_all()
+    stop_all() marca error_message como "Paro general activado". Esto es útil,
+    pero conviene documentar en la aplicación principal que después de STOP debe
+    hacerse HOME nuevamente si la posición real no es confiable.
+
+5) Planificación de trayectoria
+    La sincronización por tiempo común es adecuada para coordinar llegada
+    simultánea, pero no equivale a interpolación geométrica exacta por línea o
+    curva. Para aplicaciones CNC más exigentes podría requerirse un planificador
+    con interpolación por bloques.
+
+6) Orden de ejes en diccionarios
+    El orden de arranque depende del orden de iteración del diccionario del plan.
+    En MicroPython moderno suele ser estable, pero si se requiere un orden fijo
+    explícito, podría añadirse una secuencia de arranque configurable.
+
+7) Supervisión no bloqueante
+    Cuando move_to(..., wait=False) retorna, el usuario debe asegurar que el
+    programa principal siga actualizando o esperando los ejes. Sería útil agregar
+    un método update() del controlador para supervisión no bloqueante desde un
+    bucle principal.
+
+8) Recuperación desde ERROR o STOPPED
+    El módulo limpia errores al iniciar ciertos procesos correctos, pero no tiene
+    un método explícito reset_error(). Podría añadirse para aplicaciones con HMI
+    o comunicación serial.
+
+9) Homing simultáneo opcional
+    home_all() es secuencial por seguridad. En máquinas donde sea seguro, podría
+    añadirse un modo de HOME paralelo, aunque requeriría validaciones mecánicas
+    adicionales.
+
+10) Documentación de unidades
+    El código trabaja principalmente en milímetros, segundos y mm/s. Sería útil
+    mantener esta convención visible en todos los módulos relacionados.
